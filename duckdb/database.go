@@ -127,11 +127,12 @@ func (d *Database) Connect(ctx context.Context) (*Conn, error) {
 		return nil, nativeError("connect", abi.ErrorInvalid, "")
 	}
 	c := &Conn{
-		db:     d,
-		api:    api,
-		handle: handle,
-		stmts:  make(map[*Stmt]struct{}),
-		limits: DefaultDecodeLimits(),
+		db:                d,
+		api:               api,
+		handle:            handle,
+		stmts:             make(map[*Stmt]struct{}),
+		limits:            DefaultDecodeLimits(),
+		interruptInterval: defaultInterruptInterval,
 	}
 	d.conns[c] = struct{}{}
 	return c, nil
@@ -153,6 +154,11 @@ func (d *Database) Close() error {
 			conns = append(conns, c)
 		}
 		d.mu.Unlock()
+		// Interrupt all active queries across connections first so shutdown
+		// drains concurrent native calls in parallel rather than serially.
+		for _, c := range conns {
+			c.beginClose()
+		}
 		for _, c := range conns {
 			err = errors.Join(err, c.Close())
 		}

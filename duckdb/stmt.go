@@ -74,8 +74,8 @@ func (s *Stmt) Columns() ([]Column, error) {
 	return cols, nil
 }
 
-// Exec binds args, runs the statement to completion, copies RowsAffected, and
-// destroys the native result before returning.
+// Exec binds args, runs the statement to completion under ctx cancellation,
+// copies RowsAffected, and destroys the native result before returning.
 func (s *Stmt) Exec(ctx context.Context, args ...Value) (ExecResult, error) {
 	if s == nil {
 		return ExecResult{}, ErrClosed
@@ -95,10 +95,16 @@ func (s *Stmt) Exec(ctx context.Context, args ...Value) (ExecResult, error) {
 	if err := c.usableLocked(); err != nil {
 		return ExecResult{}, err
 	}
-	return s.execLocked(args)
+	scope, err := c.beginScopeLocked(ctx)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer c.endScopeLocked(scope)
+	return s.execLocked(args, scope)
 }
 
-// Query binds args and starts a streaming result. The Rows borrows the Stmt.
+// Query binds args and starts a streaming result governed by ctx cancellation
+// through final fetch and decode. The Rows borrows the Stmt.
 func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
 	if s == nil {
 		return nil, ErrClosed
@@ -118,14 +124,30 @@ func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
-	return s.startLocked(args)
+	scope, err := c.beginScopeLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.startLocked(args, scope)
+	if err != nil {
+		c.endScopeLocked(scope)
+		return nil, err
+	}
+	return rows, nil
 }
 
-// runPendingLocked binds args and runs pending(streaming) → tasks → execute.
-// On failure, both pending and result are destroyed before returning.
-func (s *Stmt) runPendingLocked(args []Value) (abi.Result, error) {
+// runPendingLocked binds args and runs pending(streaming) → tasks → execute
+// under scope. On failure or cancellation, pending and result are destroyed
+// before returning.
+func (s *Stmt) runPendingLocked(args []Value, scope *cancelScope) (abi.Result, error) {
+	if cerr := scope.err(); cerr != nil {
+		return abi.Result{}, cerr
+	}
 	if err := s.bindLocked(args); err != nil {
 		return abi.Result{}, err
+	}
+	if cerr := scope.err(); cerr != nil {
+		return abi.Result{}, cerr
 	}
 	api := s.conn.api
 	var pending uintptr
@@ -134,10 +156,17 @@ func (s *Stmt) runPendingLocked(args []Value) (abi.Result, error) {
 		if pending != 0 {
 			api.DestroyPending(&pending)
 		}
+		if cerr := scope.err(); cerr != nil {
+			return abi.Result{}, cerr
+		}
 		return abi.Result{}, nativeError("pending", abi.ErrorInvalid, message)
 	}
 tasks:
 	for {
+		if cerr := scope.err(); cerr != nil {
+			api.DestroyPending(&pending)
+			return abi.Result{}, cerr
+		}
 		switch api.PendingExecuteTask(pending) {
 		case abi.PendingResultReady:
 			break tasks
@@ -147,8 +176,15 @@ tasks:
 		default:
 			message := abi.GoString(api.PendingError(pending))
 			api.DestroyPending(&pending)
+			if cerr := scope.err(); cerr != nil {
+				return abi.Result{}, cerr
+			}
 			return abi.Result{}, nativeError("execute_task", abi.ErrorInvalid, message)
 		}
+	}
+	if cerr := scope.err(); cerr != nil {
+		api.DestroyPending(&pending)
+		return abi.Result{}, cerr
 	}
 	var result abi.Result
 	state := api.ExecutePending(pending, &result)
@@ -156,31 +192,41 @@ tasks:
 	if state != abi.StateSuccess {
 		err := nativeError("execute", api.ResultErrorType(&result), abi.GoString(api.ResultError(&result)))
 		api.DestroyResult(&result)
+		if cerr := scope.err(); cerr != nil {
+			return abi.Result{}, cerr
+		}
 		return abi.Result{}, err
 	}
 	return result, nil
 }
 
-func (s *Stmt) execLocked(args []Value) (ExecResult, error) {
-	result, err := s.runPendingLocked(args)
+func (s *Stmt) execLocked(args []Value, scope *cancelScope) (ExecResult, error) {
+	result, err := s.runPendingLocked(args, scope)
 	if err != nil {
 		return ExecResult{}, err
 	}
 	api := s.conn.api
 	affected := api.RowsChanged(&result)
 	api.DestroyResult(&result)
+	if !scope.tryFinish() {
+		return ExecResult{}, scope.err()
+	}
 	return ExecResult{RowsAffected: affected}, nil
 }
 
 // startLocked executes the statement, validates every column's logical type
 // tree (even if the result has 0 rows or all NULLs), and publishes a Rows only
-// after the native result is verified to be streaming.
-func (s *Stmt) startLocked(args []Value) (*Rows, error) {
-	result, err := s.runPendingLocked(args)
+// after the native result is verified to be streaming and not canceled.
+func (s *Stmt) startLocked(args []Value, scope *cancelScope) (*Rows, error) {
+	result, err := s.runPendingLocked(args, scope)
 	if err != nil {
 		return nil, err
 	}
 	api := s.conn.api
+	if cerr := scope.err(); cerr != nil {
+		api.DestroyResult(&result)
+		return nil, cerr
+	}
 	if !api.ResultIsStreaming(result) {
 		api.DestroyResult(&result)
 		return nil, ErrNotStreaming
@@ -205,9 +251,14 @@ func (s *Stmt) startLocked(args []Value) (*Rows, error) {
 		columns[i] = Column{Name: name, Type: plan.lt}
 		plans[i] = plan
 	}
+	if cerr := scope.err(); cerr != nil {
+		api.DestroyResult(&result)
+		return nil, cerr
+	}
 	rows := &Rows{
 		conn:         s.conn,
 		stmt:         s,
+		scope:        scope,
 		result:       result,
 		columns:      columns,
 		plans:        plans,

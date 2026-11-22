@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/bububa/duckdbspike/internal/abi"
 )
@@ -16,7 +17,8 @@ type ExecResult struct {
 }
 
 // Conn owns one native connection. All native calls on a Conn and on its Stmts
-// and Rows are serialized by mu.
+// and Rows are serialized by mu. Cancellation signals use cancelMu, which is
+// never held across a native call, so duckdb_interrupt never blocks on mu.
 type Conn struct {
 	_      noCopy
 	db     *Database
@@ -27,6 +29,11 @@ type Conn struct {
 	limits DecodeLimits
 	stmts  map[*Stmt]struct{}
 	active *Rows
+
+	cancelMu          sync.Mutex
+	closing           bool
+	activeScope       *cancelScope
+	interruptInterval time.Duration
 }
 
 // SetDecodeLimits configures per-value decoding limits for subsequent queries
@@ -48,6 +55,51 @@ func (c *Conn) SetDecodeLimits(limits DecodeLimits) error {
 	return nil
 }
 
+func (c *Conn) beginScopeLocked(ctx context.Context) (*cancelScope, error) {
+	c.cancelMu.Lock()
+	if c.closing {
+		c.cancelMu.Unlock()
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		c.cancelMu.Unlock()
+		return nil, err
+	}
+	scope := newCancelScope(ctx, c.api, c.handle, c.interruptInterval)
+	c.activeScope = scope
+	c.cancelMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		scope.cancel(err)
+		c.endScopeLocked(scope)
+		return nil, err
+	}
+	return scope, nil
+}
+
+func (c *Conn) endScopeLocked(scope *cancelScope) {
+	if scope == nil {
+		return
+	}
+	c.cancelMu.Lock()
+	if c.activeScope == scope {
+		c.activeScope = nil
+	}
+	c.cancelMu.Unlock()
+	scope.join()
+}
+
+// beginClose stops admitting new scopes and interrupts any in-flight native
+// call on this connection without acquiring c.mu.
+func (c *Conn) beginClose() {
+	c.cancelMu.Lock()
+	c.closing = true
+	scope := c.activeScope
+	c.cancelMu.Unlock()
+	if scope != nil {
+		scope.cancel(ErrClosed)
+	}
+}
+
 // Prepare compiles a single trusted SQL statement. SQL containing NUL is
 // rejected before reaching native code.
 func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
@@ -65,9 +117,18 @@ func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
-	s, err := c.prepareLocked(sql)
+	scope, err := c.beginScopeLocked(ctx)
 	if err != nil {
 		return nil, err
+	}
+	defer c.endScopeLocked(scope)
+	s, err := c.prepareLocked(sql, scope)
+	if err != nil {
+		return nil, err
+	}
+	if !scope.tryFinish() {
+		s.releaseLocked()
+		return nil, scope.err()
 	}
 	c.stmts[s] = struct{}{}
 	return s, nil
@@ -91,16 +152,22 @@ func (c *Conn) Exec(ctx context.Context, sql string, args ...Value) (ExecResult,
 	if err := c.usableLocked(); err != nil {
 		return ExecResult{}, err
 	}
-	s, err := c.prepareLocked(sql)
+	scope, err := c.beginScopeLocked(ctx)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	defer c.endScopeLocked(scope)
+	s, err := c.prepareLocked(sql, scope)
 	if err != nil {
 		return ExecResult{}, err
 	}
 	defer s.releaseLocked()
-	return s.execLocked(args)
+	return s.execLocked(args, scope)
 }
 
 // Query prepares sql, binds args, and starts a streaming result. The returned
-// Rows owns the statement and releases it on Close.
+// Rows owns both the statement and the cancellation scope, joining and
+// releasing them on Close.
 func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, error) {
 	if c == nil {
 		return nil, ErrClosed
@@ -116,13 +183,19 @@ func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, err
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
-	s, err := c.prepareLocked(sql)
+	scope, err := c.beginScopeLocked(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.startLocked(args)
+	s, err := c.prepareLocked(sql, scope)
+	if err != nil {
+		c.endScopeLocked(scope)
+		return nil, err
+	}
+	rows, err := s.startLocked(args, scope)
 	if err != nil {
 		s.releaseLocked()
+		c.endScopeLocked(scope)
 		return nil, err
 	}
 	rows.ownsStmt = true
@@ -139,10 +212,13 @@ func (c *Conn) usableLocked() error {
 	return nil
 }
 
-func (c *Conn) prepareLocked(sql string) (*Stmt, error) {
+func (c *Conn) prepareLocked(sql string, scope *cancelScope) (*Stmt, error) {
 	csql, err := abi.CString(sql)
 	if err != nil {
 		return nil, fmt.Errorf("%w: sql: %v", ErrInvalidInput, err)
+	}
+	if err := scope.err(); err != nil {
+		return nil, err
 	}
 	var handle uintptr
 	state := c.api.Prepare(c.handle, &csql[0], &handle)
@@ -153,17 +229,26 @@ func (c *Conn) prepareLocked(sql string) (*Stmt, error) {
 		if handle != 0 {
 			c.api.DestroyPrepare(&handle)
 		}
+		if cerr := scope.err(); cerr != nil {
+			return nil, cerr
+		}
 		return nil, nativeError("prepare", abi.ErrorInvalid, message)
+	}
+	if cerr := scope.err(); cerr != nil {
+		c.api.DestroyPrepare(&handle)
+		return nil, cerr
 	}
 	return &Stmt{conn: c, handle: handle}, nil
 }
 
-// Close closes the open Rows and every Stmt of this connection, then
-// disconnects. Close is idempotent; concurrent callers wait for completion.
+// Close interrupts any active native work on this connection, joins the native
+// call and its cancellation executor without a deadline, closes the open Rows
+// and every Stmt, then disconnects. Close is idempotent.
 func (c *Conn) Close() error {
 	if c == nil {
 		return nil
 	}
+	c.beginClose()
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()

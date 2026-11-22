@@ -30,7 +30,10 @@ type fakeNative struct {
 	values   map[uintptr]struct{}
 	ownedStr map[uintptr][]byte
 
-	doubleFree int
+	doubleFree               int
+	interruptAfterDisconnect int
+	interrupts               int
+	onInterrupt              func(conn uintptr)
 
 	// Failure / behavior injection hooks.
 	failCreateConfig      bool
@@ -133,6 +136,9 @@ func (f *fakeNative) assertZeroLeaks(t *testing.T) {
 	defer f.mu.Unlock()
 	if f.doubleFree != 0 {
 		t.Fatalf("detected %d double-free calls", f.doubleFree)
+	}
+	if f.interruptAfterDisconnect != 0 {
+		t.Fatalf("detected %d duckdb_interrupt calls after disconnect", f.interruptAfterDisconnect)
 	}
 	if len(f.configs) != 0 || len(f.dbs) != 0 || len(f.conns) != 0 ||
 		len(f.stmts) != 0 || len(f.pendings) != 0 || len(f.results) != 0 ||
@@ -257,6 +263,18 @@ func (f *fakeNative) api() *abi.API {
 			}
 			delete(f.conns, *conn)
 			*conn = 0
+		},
+		Interrupt: func(conn uintptr) {
+			f.mu.Lock()
+			if _, ok := f.conns[conn]; !ok {
+				f.interruptAfterDisconnect++
+			}
+			f.interrupts++
+			cb := f.onInterrupt
+			f.mu.Unlock()
+			if cb != nil {
+				cb(conn)
+			}
 		},
 		Prepare: func(conn uintptr, query *byte, out *uintptr) int32 {
 			f.mu.Lock()
