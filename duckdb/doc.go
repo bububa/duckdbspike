@@ -13,9 +13,12 @@
 // materializes the entire result in native memory outside memory_limit, so it
 // is not exposed.
 //
-// Status: native resource kernel. Value decoding, parameter binding, and native
-// query interruption are added in later phases; until then a context only gates
-// the start of a call.
+// Type precision: every supported SQL type is bound and decoded with its exact
+// width, scale, unit, and SQL NULL semantics without passing through float64,
+// string, or JSON. Unsupported logical types fail when inspecting a statement
+// or opening a result, even if every row is NULL or the result is empty. All
+// decoded Values own their Go memory and remain valid after Rows advances or
+// closes.
 package duckdb
 
 import (
@@ -27,10 +30,15 @@ import (
 
 // Sentinel errors.
 var (
-	ErrClosed       = errors.New("duckdb: handle is closed")
-	ErrBusy         = errors.New("duckdb: connection has an open Rows")
-	ErrNotStreaming = errors.New("duckdb: native result is not streaming")
-	ErrInvalidInput = errors.New("duckdb: invalid input")
+	ErrClosed          = errors.New("duckdb: handle is closed")
+	ErrBusy            = errors.New("duckdb: connection has an open Rows")
+	ErrNotStreaming    = errors.New("duckdb: native result is not streaming")
+	ErrInvalidInput    = errors.New("duckdb: invalid input")
+	ErrUnsupportedType = errors.New("duckdb: unsupported logical type")
+	ErrTypeMismatch    = errors.New("duckdb: value type mismatch")
+	ErrNullValue       = errors.New("duckdb: value is SQL NULL")
+	ErrOutOfRange      = errors.New("duckdb: value out of target range")
+	ErrLimitExceeded   = errors.New("duckdb: decode limit exceeded")
 
 	ErrUnsupportedPlatform = abi.ErrUnsupportedPlatform
 	ErrUnsafeLibraryPath   = abi.ErrUnsafeLibraryPath

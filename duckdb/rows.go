@@ -11,11 +11,13 @@ import (
 // duplicate names are preserved.
 type Column struct {
 	Name string
+	Type LogicalType
 }
 
 // Rows is an exclusive streaming cursor over one native result. It holds the
-// connection lease until Close. Chunk memory is borrowed from the current
-// native chunk and is never exposed beyond the next call to Next or Close.
+// connection lease until Close. At most one native chunk is alive at a time;
+// chunk memory is never exposed to callers, and every decoded Value owns its
+// Go data and survives subsequent Next and Close calls.
 type Rows struct {
 	_            noCopy
 	conn         *Conn
@@ -23,9 +25,13 @@ type Rows struct {
 	ownsStmt     bool
 	result       abi.Result
 	columns      []Column
+	plans        []columnPlan
+	limits       DecodeLimits
 	rowsAffected uint64
 	chunk        uintptr
-	size         uint64
+	chunkSize    uint64
+	rowIdx       uint64
+	hasRow       bool
 	err          error
 	done         bool
 	closed       bool
@@ -48,24 +54,9 @@ func (r *Rows) RowsAffected() uint64 {
 	return r.rowsAffected
 }
 
-// ChunkRowCount returns the number of rows in the current chunk, or 0 when no
-// chunk is loaded or after Close.
-func (r *Rows) ChunkRowCount() int {
-	if r == nil {
-		return 0
-	}
-	c := r.conn
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if r.closed || r.chunk == 0 {
-		return 0
-	}
-	return int(r.size)
-}
-
-// Next advances to the next non-empty native chunk. It returns false at end of
-// stream, after an error (see Err), or after Close. A NULL native chunk is end
-// of stream only when the result carries no error.
+// Next advances the cursor by one row, streaming one native chunk at a time.
+// It returns false at end of stream, after an error (see Err), or after Close.
+// A NULL native chunk is end of stream only when the result carries no error.
 func (r *Rows) Next() bool {
 	if r == nil {
 		return false
@@ -74,19 +65,27 @@ func (r *Rows) Next() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if r.closed {
+		r.hasRow = false
 		if r.err == nil && !r.done {
 			r.err = ErrClosed
 		}
 		return false
 	}
 	if r.done || r.err != nil {
+		r.hasRow = false
 		return false
+	}
+	if r.hasRow && r.rowIdx+1 < r.chunkSize {
+		r.rowIdx++
+		return true
 	}
 	api := c.api
 	for {
 		if r.chunk != 0 {
 			api.DestroyDataChunk(&r.chunk)
-			r.size = 0
+			r.chunkSize = 0
+			r.rowIdx = 0
+			r.hasRow = false
 		}
 		chunk := api.FetchChunk(r.result)
 		if chunk == 0 {
@@ -102,15 +101,82 @@ func (r *Rows) Next() bool {
 		size := api.DataChunkGetSize(chunk)
 		if size > math.MaxInt {
 			api.DestroyDataChunk(&chunk)
-			r.err = fmt.Errorf("%w: chunk size %d overflows int", ErrInvalidInput, size)
+			r.err = fmt.Errorf("%w: chunk size %d overflows int", ErrLimitExceeded, size)
 			return false
 		}
 		r.chunk = chunk
-		r.size = size
-		if r.size > 0 {
+		r.chunkSize = size
+		if size > 0 {
+			r.rowIdx = 0
+			r.hasRow = true
 			return true
 		}
 	}
+}
+
+// DecodeRow decodes every column of the current row into dst (reusing dst's
+// backing array when capacity permits). Returned Values own their data and
+// remain valid after Next and Close.
+func (r *Rows) DecodeRow(dst []Value) ([]Value, error) {
+	if r == nil {
+		return nil, ErrClosed
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed {
+		return nil, ErrClosed
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	if !r.hasRow || r.chunk == 0 {
+		return nil, fmt.Errorf("%w: DecodeRow called without an active row", ErrInvalidInput)
+	}
+	ncol := len(r.plans)
+	if cap(dst) < ncol {
+		dst = make([]Value, ncol)
+	} else {
+		dst = dst[:ncol]
+	}
+	api := c.api
+	for i := 0; i < ncol; i++ {
+		vec := api.DataChunkGetVector(r.chunk, uint64(i))
+		v, err := decodeVectorValue(api, &r.plans[i], vec, r.rowIdx, r.limits)
+		if err != nil {
+			return nil, fmt.Errorf("column %d (%q): %w", i, r.columns[i].Name, err)
+		}
+		dst[i] = v
+	}
+	return dst, nil
+}
+
+// ColumnValue decodes a single column of the current row by zero-based ordinal.
+func (r *Rows) ColumnValue(col int) (Value, error) {
+	if r == nil {
+		return Value{}, ErrClosed
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed {
+		return Value{}, ErrClosed
+	}
+	if r.err != nil {
+		return Value{}, r.err
+	}
+	if !r.hasRow || r.chunk == 0 {
+		return Value{}, fmt.Errorf("%w: ColumnValue called without an active row", ErrInvalidInput)
+	}
+	if col < 0 || col >= len(r.plans) {
+		return Value{}, fmt.Errorf("%w: column ordinal %d out of range [0,%d)", ErrOutOfRange, col, len(r.plans))
+	}
+	vec := c.api.DataChunkGetVector(r.chunk, uint64(col))
+	v, err := decodeVectorValue(c.api, &r.plans[col], vec, r.rowIdx, r.limits)
+	if err != nil {
+		return Value{}, fmt.Errorf("column %d (%q): %w", col, r.columns[col].Name, err)
+	}
+	return v, nil
 }
 
 // Err returns the error that ended iteration, if any. Calling Next after Close
@@ -143,10 +209,12 @@ func (r *Rows) releaseLocked() {
 		return
 	}
 	r.closed = true
+	r.hasRow = false
 	api := r.conn.api
 	if r.chunk != 0 {
 		api.DestroyDataChunk(&r.chunk)
-		r.size = 0
+		r.chunkSize = 0
+		r.rowIdx = 0
 	}
 	api.DestroyResult(&r.result)
 	if r.conn.active == r {

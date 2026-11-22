@@ -26,6 +26,8 @@ type fakeNative struct {
 	pendings map[uintptr]*fakePending
 	results  map[uintptr]*fakeResult
 	chunks   map[uintptr]uint64
+	ltypes   map[uintptr]int32
+	values   map[uintptr]struct{}
 	ownedStr map[uintptr][]byte
 
 	doubleFree int
@@ -89,6 +91,8 @@ func newFakeNative(t *testing.T) (*fakeNative, *Library) {
 		pendings: make(map[uintptr]*fakePending),
 		results:  make(map[uintptr]*fakeResult),
 		chunks:   make(map[uintptr]uint64),
+		ltypes:   make(map[uintptr]int32),
+		values:   make(map[uintptr]struct{}),
 		ownedStr: make(map[uintptr][]byte),
 	}
 	t.Cleanup(func() {
@@ -132,10 +136,10 @@ func (f *fakeNative) assertZeroLeaks(t *testing.T) {
 	}
 	if len(f.configs) != 0 || len(f.dbs) != 0 || len(f.conns) != 0 ||
 		len(f.stmts) != 0 || len(f.pendings) != 0 || len(f.results) != 0 ||
-		len(f.chunks) != 0 || len(f.ownedStr) != 0 {
-		t.Fatalf("native resource leak: configs=%d dbs=%d conns=%d stmts=%d pendings=%d results=%d chunks=%d ownedStr=%d",
+		len(f.chunks) != 0 || len(f.ltypes) != 0 || len(f.values) != 0 || len(f.ownedStr) != 0 {
+		t.Fatalf("native resource leak: configs=%d dbs=%d conns=%d stmts=%d pendings=%d results=%d chunks=%d ltypes=%d values=%d ownedStr=%d",
 			len(f.configs), len(f.dbs), len(f.conns), len(f.stmts),
-			len(f.pendings), len(f.results), len(f.chunks), len(f.ownedStr))
+			len(f.pendings), len(f.results), len(f.chunks), len(f.ltypes), len(f.values), len(f.ownedStr))
 	}
 }
 
@@ -298,6 +302,40 @@ func (f *fakeNative) api() *abi.API {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			return f.nParams
+		},
+		ClearBindings: func(stmt uintptr) int32 {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if _, ok := f.stmts[stmt]; !ok {
+				return abi.StateError
+			}
+			return abi.StateSuccess
+		},
+		BindNull:  func(stmt uintptr, idx uint64) int32 { return abi.StateSuccess },
+		BindInt64: func(stmt uintptr, idx uint64, val int64) int32 { return abi.StateSuccess },
+		ColumnLogicalType: func(result *abi.Result, col uint64) uintptr {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			id := f.allocID()
+			f.ltypes[id] = abi.TypeBigint
+			return id
+		},
+		GetTypeID: func(lt uintptr) int32 {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.ltypes[lt]
+		},
+		DestroyLogicalType: func(lt *uintptr) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			if lt == nil || *lt == 0 {
+				return
+			}
+			if _, ok := f.ltypes[*lt]; !ok {
+				f.doubleFree++
+			}
+			delete(f.ltypes, *lt)
+			*lt = 0
 		},
 		PendingPreparedStreaming: func(stmt uintptr, out *uintptr) int32 {
 			f.mu.Lock()
@@ -634,12 +672,12 @@ func TestFetchErrorNotEOFAndEmptyChunksReleased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var gotSizes []int
+	var total int
 	for rows.Next() {
-		gotSizes = append(gotSizes, rows.ChunkRowCount())
+		total++
 	}
-	if len(gotSizes) != 2 || gotSizes[0] != 10 || gotSizes[1] != 5 {
-		t.Fatalf("got chunk sizes %v, want [10 5]", gotSizes)
+	if total != 15 {
+		t.Fatalf("got %d rows across chunks [0,10,0,5], want 15", total)
 	}
 	var derr *Error
 	if !errors.As(rows.Err(), &derr) || derr.Kind != ErrorKindInterrupt || derr.Message != "Interrupted!" {
@@ -651,8 +689,8 @@ func TestFetchErrorNotEOFAndEmptyChunksReleased(t *testing.T) {
 	if len(cols) != 2 || cols[0].Name != "a" || cols[1].Name != "a" {
 		t.Fatalf("columns after close = %+v", cols)
 	}
-	if rows.ChunkRowCount() != 0 {
-		t.Fatalf("ChunkRowCount after close = %d, want 0", rows.ChunkRowCount())
+	if _, err := rows.DecodeRow(nil); !errors.Is(err, ErrClosed) {
+		t.Fatalf("DecodeRow after close = %v, want ErrClosed", err)
 	}
 	_ = db.Close()
 	f.assertZeroLeaks(t)
@@ -672,7 +710,7 @@ func TestCloseIdempotentCascadeAndBusyLease(t *testing.T) {
 		t.Fatalf("ParamCount = %d, %v", n, err)
 	}
 	f.chunkSizes = []uint64{3}
-	rows, err := stmt.Query(ctx)
+	rows, err := stmt.Query(ctx, Int64Value(1), NullValue())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,18 +724,18 @@ func TestCloseIdempotentCascadeAndBusyLease(t *testing.T) {
 	if _, err := conn.Exec(ctx, "SET threads=1"); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Exec while busy: %v", err)
 	}
-	if _, err := stmt.Query(ctx); !errors.Is(err, ErrBusy) {
+	if _, err := stmt.Query(ctx, Int64Value(1), NullValue()); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Stmt.Query while busy: %v", err)
 	}
-	if _, err := stmt.Exec(ctx); !errors.Is(err, ErrBusy) {
+	if _, err := stmt.Exec(ctx, Int64Value(1), NullValue()); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Stmt.Exec while busy: %v", err)
 	}
 	if err := stmt.Close(); !errors.Is(err, ErrBusy) {
 		t.Fatalf("Stmt.Close while busy: %v", err)
 	}
 
-	if !rows.Next() || rows.ChunkRowCount() != 3 {
-		t.Fatal("expected first chunk")
+	if !rows.Next() {
+		t.Fatal("expected first row")
 	}
 	// Closing Rows releases lease and chunk; calling Close twice is idempotent.
 	if err := rows.Close(); err != nil {
@@ -714,6 +752,7 @@ func TestCloseIdempotentCascadeAndBusyLease(t *testing.T) {
 	}
 
 	// Now Stmt and Conn are usable again.
+	f.nParams = 0
 	f.nonStreamingResult = true
 	f.resultRowsAffected = 7
 	execRes, err := conn.Exec(ctx, "INSERT INTO t VALUES (1)")

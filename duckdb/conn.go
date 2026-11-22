@@ -24,8 +24,28 @@ type Conn struct {
 	mu     sync.Mutex
 	handle uintptr
 	closed bool
+	limits DecodeLimits
 	stmts  map[*Stmt]struct{}
 	active *Rows
+}
+
+// SetDecodeLimits configures per-value decoding limits for subsequent queries
+// on this connection. Zero fields select DefaultDecodeLimits.
+func (c *Conn) SetDecodeLimits(limits DecodeLimits) error {
+	if c == nil {
+		return ErrClosed
+	}
+	norm, err := limits.normalized()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
+	c.limits = norm
+	return nil
 }
 
 // Prepare compiles a single trusted SQL statement. SQL containing NUL is
@@ -53,10 +73,10 @@ func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
 	return s, nil
 }
 
-// Exec prepares and runs a statement that does not stream rows (such as SET,
-// CREATE VIEW, or CHECKPOINT). RowsAffected is copied before the native result
-// and statement are destroyed.
-func (c *Conn) Exec(ctx context.Context, sql string) (ExecResult, error) {
+// Exec prepares, binds args, and runs a statement that does not stream rows
+// (such as SET, CREATE VIEW, or CHECKPOINT). RowsAffected is copied before the
+// native result and statement are destroyed.
+func (c *Conn) Exec(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
 	if c == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -76,12 +96,12 @@ func (c *Conn) Exec(ctx context.Context, sql string) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	defer s.releaseLocked()
-	return s.execLocked()
+	return s.execLocked(args)
 }
 
-// Query prepares sql and starts a streaming result. The returned Rows owns
-// the statement and releases it on Close.
-func (c *Conn) Query(ctx context.Context, sql string) (*Rows, error) {
+// Query prepares sql, binds args, and starts a streaming result. The returned
+// Rows owns the statement and releases it on Close.
+func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, error) {
 	if c == nil {
 		return nil, ErrClosed
 	}
@@ -100,7 +120,7 @@ func (c *Conn) Query(ctx context.Context, sql string) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.startLocked()
+	rows, err := s.startLocked(args)
 	if err != nil {
 		s.releaseLocked()
 		return nil, err

@@ -83,7 +83,7 @@ func TestNativeLifecycleStreamingAndErrors(t *testing.T) {
 		}
 		var total int
 		for rows.Next() {
-			total += rows.ChunkRowCount()
+			total++
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -168,7 +168,7 @@ func TestNativeFileDatabaseAndGCPressure(t *testing.T) {
 		}
 		var n int
 		for rows.Next() {
-			n += rows.ChunkRowCount()
+			n++
 		}
 		if err := rows.Err(); err != nil {
 			t.Fatalf("iter %d Err: %v", i, err)

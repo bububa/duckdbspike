@@ -37,9 +37,46 @@ func (s *Stmt) ParamCount() (int, error) {
 	return int(n), nil
 }
 
-// Exec runs the statement to completion, copies RowsAffected, and destroys the
-// native result before returning.
-func (s *Stmt) Exec(ctx context.Context) (ExecResult, error) {
+// Columns inspects the prepared statement's output schema before execution,
+// enabling callers and query templates to assert exact column names and types
+// (for example rejecting expressions that widen DECIMAL to DOUBLE). Any
+// unsupported logical type fails immediately.
+func (s *Stmt) Columns() ([]Column, error) {
+	if s == nil {
+		return nil, ErrClosed
+	}
+	c := s.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s.closed || c.closed {
+		return nil, ErrClosed
+	}
+	api := c.api
+	n := api.PreparedStatementColumnCount(s.handle)
+	if n > math.MaxInt {
+		return nil, fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, n)
+	}
+	cols := make([]Column, int(n))
+	for i := uint64(0); i < n; i++ {
+		namePtr := api.PreparedStatementColumnName(s.handle, i)
+		name := abi.GoString(namePtr)
+		if namePtr != 0 {
+			api.Free(namePtr)
+		}
+		lt := api.PreparedStatementColumnLogicalType(s.handle, i)
+		plan, err := buildColumnPlan(api, lt, 0, c.limits)
+		api.DestroyLogicalType(&lt)
+		if err != nil {
+			return nil, fmt.Errorf("column %d (%q): %w", i, name, err)
+		}
+		cols[i] = Column{Name: name, Type: plan.lt}
+	}
+	return cols, nil
+}
+
+// Exec binds args, runs the statement to completion, copies RowsAffected, and
+// destroys the native result before returning.
+func (s *Stmt) Exec(ctx context.Context, args ...Value) (ExecResult, error) {
 	if s == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -58,11 +95,11 @@ func (s *Stmt) Exec(ctx context.Context) (ExecResult, error) {
 	if err := c.usableLocked(); err != nil {
 		return ExecResult{}, err
 	}
-	return s.execLocked()
+	return s.execLocked(args)
 }
 
-// Query starts a streaming result. The Rows borrows the Stmt.
-func (s *Stmt) Query(ctx context.Context) (*Rows, error) {
+// Query binds args and starts a streaming result. The Rows borrows the Stmt.
+func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
 	if s == nil {
 		return nil, ErrClosed
 	}
@@ -81,12 +118,15 @@ func (s *Stmt) Query(ctx context.Context) (*Rows, error) {
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
-	return s.startLocked()
+	return s.startLocked(args)
 }
 
-// runPendingLocked runs pending(streaming) → tasks → execute. On failure, both
-// pending and result are destroyed before returning.
-func (s *Stmt) runPendingLocked() (abi.Result, error) {
+// runPendingLocked binds args and runs pending(streaming) → tasks → execute.
+// On failure, both pending and result are destroyed before returning.
+func (s *Stmt) runPendingLocked(args []Value) (abi.Result, error) {
+	if err := s.bindLocked(args); err != nil {
+		return abi.Result{}, err
+	}
 	api := s.conn.api
 	var pending uintptr
 	if api.PendingPreparedStreaming(s.handle, &pending) != abi.StateSuccess {
@@ -121,8 +161,8 @@ tasks:
 	return result, nil
 }
 
-func (s *Stmt) execLocked() (ExecResult, error) {
-	result, err := s.runPendingLocked()
+func (s *Stmt) execLocked(args []Value) (ExecResult, error) {
+	result, err := s.runPendingLocked(args)
 	if err != nil {
 		return ExecResult{}, err
 	}
@@ -132,10 +172,11 @@ func (s *Stmt) execLocked() (ExecResult, error) {
 	return ExecResult{RowsAffected: affected}, nil
 }
 
-// startLocked executes the statement and publishes a Rows only after the
-// native result is verified to be streaming.
-func (s *Stmt) startLocked() (*Rows, error) {
-	result, err := s.runPendingLocked()
+// startLocked executes the statement, validates every column's logical type
+// tree (even if the result has 0 rows or all NULLs), and publishes a Rows only
+// after the native result is verified to be streaming.
+func (s *Stmt) startLocked(args []Value) (*Rows, error) {
+	result, err := s.runPendingLocked(args)
 	if err != nil {
 		return nil, err
 	}
@@ -149,15 +190,28 @@ func (s *Stmt) startLocked() (*Rows, error) {
 		api.DestroyResult(&result)
 		return nil, fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, n)
 	}
-	columns := make([]Column, n)
-	for i := range columns {
-		columns[i].Name = abi.GoString(api.ColumnName(&result, uint64(i)))
+	limits := s.conn.limits
+	columns := make([]Column, int(n))
+	plans := make([]columnPlan, int(n))
+	for i := uint64(0); i < n; i++ {
+		name := abi.GoString(api.ColumnName(&result, i))
+		lt := api.ColumnLogicalType(&result, i)
+		plan, planErr := buildColumnPlan(api, lt, 0, limits)
+		api.DestroyLogicalType(&lt)
+		if planErr != nil {
+			api.DestroyResult(&result)
+			return nil, fmt.Errorf("column %d (%q): %w", i, name, planErr)
+		}
+		columns[i] = Column{Name: name, Type: plan.lt}
+		plans[i] = plan
 	}
 	rows := &Rows{
 		conn:         s.conn,
 		stmt:         s,
 		result:       result,
 		columns:      columns,
+		plans:        plans,
+		limits:       limits,
 		rowsAffected: api.RowsChanged(&result),
 	}
 	s.rows = rows

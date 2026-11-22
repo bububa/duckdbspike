@@ -126,7 +126,13 @@ func (d *Database) Connect(ctx context.Context) (*Conn, error) {
 		}
 		return nil, nativeError("connect", abi.ErrorInvalid, "")
 	}
-	c := &Conn{db: d, api: api, handle: handle, stmts: make(map[*Stmt]struct{})}
+	c := &Conn{
+		db:     d,
+		api:    api,
+		handle: handle,
+		stmts:  make(map[*Stmt]struct{}),
+		limits: DefaultDecodeLimits(),
+	}
 	d.conns[c] = struct{}{}
 	return c, nil
 }
