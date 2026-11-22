@@ -39,6 +39,8 @@ var (
 	ErrNullValue       = errors.New("duckdb: value is SQL NULL")
 	ErrOutOfRange      = errors.New("duckdb: value out of target range")
 	ErrLimitExceeded   = errors.New("duckdb: decode limit exceeded")
+	ErrBudgetExceeded  = errors.New("duckdb: resource budget exceeded")
+	ErrQueueFull       = errors.New("duckdb: query admission queue is full")
 
 	ErrUnsupportedPlatform = abi.ErrUnsupportedPlatform
 	ErrUnsafeLibraryPath   = abi.ErrUnsafeLibraryPath

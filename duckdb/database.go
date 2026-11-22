@@ -36,13 +36,16 @@ type Option struct {
 
 // Database owns one native database instance.
 type Database struct {
-	_      noCopy
-	lib    *Library
-	mu     sync.Mutex
-	handle uintptr
-	closed bool
-	conns  map[*Conn]struct{}
-	once   sync.Once
+	_             noCopy
+	lib           *Library
+	mu            sync.Mutex
+	handle        uintptr
+	closed        bool
+	conns         map[*Conn]struct{}
+	once          sync.Once
+	defaultDecode DecodeLimits
+	defaultResult ResultLimits
+	onClose       func()
 }
 
 // Open opens path (":memory:" or a file path) with options applied in order.
@@ -99,7 +102,12 @@ func (l *Library) Open(ctx context.Context, path string, options ...Option) (*Da
 		}
 		return nil, nativeError("open", abi.ErrorInvalid, message)
 	}
-	return &Database{lib: l, handle: handle, conns: make(map[*Conn]struct{})}, nil
+	return &Database{
+		lib:           l,
+		handle:        handle,
+		conns:         make(map[*Conn]struct{}),
+		defaultDecode: DefaultDecodeLimits(),
+	}, nil
 }
 
 // Connect opens a connection owned by the database.
@@ -131,7 +139,8 @@ func (d *Database) Connect(ctx context.Context) (*Conn, error) {
 		api:               api,
 		handle:            handle,
 		stmts:             make(map[*Stmt]struct{}),
-		limits:            DefaultDecodeLimits(),
+		limits:            d.defaultDecode,
+		resultLimits:      d.defaultResult,
 		interruptInterval: defaultInterruptInterval,
 	}
 	d.conns[c] = struct{}{}
@@ -163,14 +172,20 @@ func (d *Database) Close() error {
 			err = errors.Join(err, c.Close())
 		}
 		d.mu.Lock()
+		var release func()
 		if len(d.conns) != 0 {
 			// Unreachable by construction; keep the instance rather than free
 			// it under live connections.
 			err = errors.Join(err, fmt.Errorf("duckdb: %d connections still registered at close; database retained", len(d.conns)))
 		} else {
 			d.lib.api.Close(&d.handle)
+			release = d.onClose
+			d.onClose = nil
 		}
 		d.mu.Unlock()
+		if release != nil {
+			release()
+		}
 	})
 	return err
 }

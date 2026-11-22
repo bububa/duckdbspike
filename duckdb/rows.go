@@ -29,7 +29,10 @@ type Rows struct {
 	columns      []Column
 	plans        []columnPlan
 	limits       DecodeLimits
+	resultLimits ResultLimits
 	rowsAffected uint64
+	rowsRead     uint64
+	bytesRead    uint64
 	chunk        uintptr
 	chunkSize    uint64
 	rowIdx       uint64
@@ -85,7 +88,13 @@ func (r *Rows) Next() bool {
 		return false
 	}
 	if r.hasRow && r.rowIdx+1 < r.chunkSize {
+		if r.resultLimits.MaxRows > 0 && r.rowsRead >= r.resultLimits.MaxRows {
+			r.hasRow = false
+			r.err = fmt.Errorf("%w: result row count exceeds limit %d", ErrBudgetExceeded, r.resultLimits.MaxRows)
+			return false
+		}
 		r.rowIdx++
+		r.rowsRead++
 		return true
 	}
 	api := c.api
@@ -133,8 +142,13 @@ func (r *Rows) Next() bool {
 		r.chunk = chunk
 		r.chunkSize = size
 		if size > 0 {
+			if r.resultLimits.MaxRows > 0 && r.rowsRead >= r.resultLimits.MaxRows {
+				r.err = fmt.Errorf("%w: result row count exceeds limit %d", ErrBudgetExceeded, r.resultLimits.MaxRows)
+				return false
+			}
 			r.rowIdx = 0
 			r.hasRow = true
+			r.rowsRead++
 			return true
 		}
 	}
@@ -170,19 +184,58 @@ func (r *Rows) DecodeRow(dst []Value) ([]Value, error) {
 		dst = dst[:ncol]
 	}
 	api := c.api
+	var rowBytes uint64
 	for i := 0; i < ncol; i++ {
 		vec := api.DataChunkGetVector(r.chunk, uint64(i))
 		v, err := decodeVectorValue(api, &r.plans[i], vec, r.rowIdx, r.limits)
 		if err != nil {
-			return nil, fmt.Errorf("column %d (%q): %w", i, r.columns[i].Name, err)
+			r.err = fmt.Errorf("column %d (%q): %w", i, r.columns[i].Name, err)
+			return nil, r.err
+		}
+		if r.resultLimits.MaxBytes > 0 {
+			vb := valueBytes(v)
+			if r.bytesRead+rowBytes+vb < r.bytesRead || r.bytesRead+rowBytes+vb > r.resultLimits.MaxBytes {
+				r.err = fmt.Errorf("%w: decoded result bytes exceed limit %d", ErrBudgetExceeded, r.resultLimits.MaxBytes)
+				return nil, r.err
+			}
+			rowBytes += vb
 		}
 		dst[i] = v
 	}
+	r.bytesRead += rowBytes
 	if cerr := r.scope.err(); cerr != nil {
 		r.err = cerr
 		return nil, cerr
 	}
 	return dst, nil
+}
+
+// ReadBatch decodes up to maxRows rows into caller-owned slices without
+// prefetching the entire result. Returning (batch, nil) with len(batch) == 0
+// signals clean end of stream.
+func (r *Rows) ReadBatch(maxRows int, dst [][]Value) ([][]Value, error) {
+	if maxRows <= 0 {
+		return nil, fmt.Errorf("%w: maxRows must be positive", ErrInvalidInput)
+	}
+	batch := dst[:0]
+	for len(batch) < maxRows {
+		if !r.Next() {
+			if err := r.Err(); err != nil {
+				return nil, err
+			}
+			return batch, nil
+		}
+		var rowBuf []Value
+		if len(batch) < cap(batch) {
+			rowBuf = batch[:len(batch)+1][len(batch)]
+		}
+		row, err := r.DecodeRow(rowBuf)
+		if err != nil {
+			return nil, err
+		}
+		batch = append(batch, row)
+	}
+	return batch, nil
 }
 
 // ColumnValue decodes a single column of the current row by zero-based ordinal.

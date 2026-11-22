@@ -20,20 +20,22 @@ type ExecResult struct {
 // and Rows are serialized by mu. Cancellation signals use cancelMu, which is
 // never held across a native call, so duckdb_interrupt never blocks on mu.
 type Conn struct {
-	_      noCopy
-	db     *Database
-	api    *abi.API
-	mu     sync.Mutex
-	handle uintptr
-	closed bool
-	limits DecodeLimits
-	stmts  map[*Stmt]struct{}
-	active *Rows
+	_            noCopy
+	db           *Database
+	api          *abi.API
+	mu           sync.Mutex
+	handle       uintptr
+	closed       bool
+	limits       DecodeLimits
+	resultLimits ResultLimits
+	stmts        map[*Stmt]struct{}
+	active       *Rows
 
 	cancelMu          sync.Mutex
 	closing           bool
 	activeScope       *cancelScope
 	interruptInterval time.Duration
+	closeOnce         sync.Once
 }
 
 // SetDecodeLimits configures per-value decoding limits for subsequent queries
@@ -52,6 +54,21 @@ func (c *Conn) SetDecodeLimits(limits DecodeLimits) error {
 		return ErrClosed
 	}
 	c.limits = norm
+	return nil
+}
+
+// SetResultLimits configures per-query Go-side row and decoded-byte limits for
+// subsequent queries on this connection.
+func (c *Conn) SetResultLimits(limits ResultLimits) error {
+	if c == nil {
+		return ErrClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
+	c.resultLimits = limits
 	return nil
 }
 
@@ -243,26 +260,25 @@ func (c *Conn) prepareLocked(sql string, scope *cancelScope) (*Stmt, error) {
 
 // Close interrupts any active native work on this connection, joins the native
 // call and its cancellation executor without a deadline, closes the open Rows
-// and every Stmt, then disconnects. Close is idempotent.
+// and every Stmt, disconnects, and deregisters from the Database. Concurrent
+// callers wait until teardown and deregistration finish. Close is idempotent.
 func (c *Conn) Close() error {
 	if c == nil {
 		return nil
 	}
 	c.beginClose()
-	c.mu.Lock()
-	if c.closed {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		if c.active != nil {
+			c.active.releaseLocked()
+		}
+		for s := range c.stmts {
+			s.releaseLocked()
+		}
+		c.api.Disconnect(&c.handle)
 		c.mu.Unlock()
-		return nil
-	}
-	c.closed = true
-	if c.active != nil {
-		c.active.releaseLocked()
-	}
-	for s := range c.stmts {
-		s.releaseLocked()
-	}
-	c.api.Disconnect(&c.handle)
-	c.mu.Unlock()
-	c.db.forget(c)
+		c.db.forget(c)
+	})
 	return nil
 }

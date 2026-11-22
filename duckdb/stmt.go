@@ -263,6 +263,7 @@ func (s *Stmt) startLocked(args []Value, scope *cancelScope) (*Rows, error) {
 		columns:      columns,
 		plans:        plans,
 		limits:       limits,
+		resultLimits: s.conn.resultLimits,
 		rowsAffected: api.RowsChanged(&result),
 	}
 	s.rows = rows
