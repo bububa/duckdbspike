@@ -17,7 +17,7 @@ jobs:
       run:
         working-directory: ${{ env.GOPATH }}/${{ env.package }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: ${{ env.GOPATH }}/${{ env.package }}
 
@@ -62,7 +62,7 @@ jobs:
             sha256: 75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Go
         uses: actions/setup-go@v7
