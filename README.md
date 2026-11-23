@@ -1,8 +1,11 @@
 # DuckDB Spike
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/bububa/duckdbspike.svg)](https://pkg.go.dev/github.com/bububa/duckdbspike)
-[![Go Report Card](https://goreportcard.com/badge/github.com/bububa/duckdbspike)](https://goreportcard.com/report/github.com/bububa/duckdbspike)
-[![CI](https://github.com/bububa/duckdbspike/actions/workflows/go.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/go.yml)
+[![Go](https://github.com/bububa/duckdbspike/actions/workflows/go.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/go.yml)
+[![goreleaser](https://github.com/bububa/duckdbspike/actions/workflows/goreleaser.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/goreleaser.yml)
+[![GitHub go.mod Go version of a Go module](https://img.shields.io/github/go-mod/go-version/bububa/atomic-agents.svg)](https://github.com/bububa/atomic-agents)
+[![GitHub license](https://img.shields.io/github/license/bububa/duckdbspike.svg)](https://github.com/bububa/duckdbspike/blob/master/LICENSE)
+[![GitHub release](https://img.shields.io/github/release/bububa/duckdbspike.svg)](https://GitHub.com/bububa/duckdbspike/releases/)
 
 > Minimal, `CGO_ENABLED=0` purego binding for a single pinned DuckDB native C API release, designed for read-only telemetry reporting.
 
@@ -13,8 +16,8 @@
 | `darwin/arm64`  | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-osx-universal.zip`) | `75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344` | MIT     |
 | `linux/amd64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-amd64.zip`)   | `3f4962cdd266eab2b479a5b5a4a6d063d279b2954ae814ed00385d553b747633` | MIT     |
 | `linux/arm64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-arm64.zip`)   | `23686593dba4ec22c6e581bb1c843b3964e84c4bc4d0063d8b4daddd2e20e30a` | MIT     |
-| `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 | `windows/amd64` | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-windows-amd64.zip`) | `7e90bdef028d57b45490d6f53530e3c012a5d9abdc4c6723449200663dc84ed0` | MIT     |
+| `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 
 Platforms without a real native acceptance record are rejected at load time with
 `ErrUnsupportedPlatform`. Cross-compilation is not acceptance.
