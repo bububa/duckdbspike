@@ -31,7 +31,11 @@ func dirBytesAndFiles(dir string) (int64, int) {
 }
 
 func openFDCount() int {
-	entries, err := os.ReadDir("/dev/fd")
+	dir := "/dev/fd"
+	if runtime.GOOS == "linux" {
+		dir = "/proc/self/fd"
+	}
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return -1
 	}
@@ -41,6 +45,9 @@ func openFDCount() int {
 func maxRSSBytes() int64 {
 	var ru syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
+	if runtime.GOOS == "linux" {
+		return ru.Maxrss * 1024
+	}
 	return ru.Maxrss
 }
 
