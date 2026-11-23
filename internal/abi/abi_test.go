@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
@@ -144,39 +145,46 @@ func TestLoadPathAndChecksumGuards(t *testing.T) {
 		t.Fatalf("missing path: got %v, want ErrUnsafeLibraryPath", err)
 	}
 
-	// Group-writable file rejected, including through a symlink.
-	writableFile := filepath.Join(dir, "writable.dylib")
-	if err := os.WriteFile(writableFile, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(writableFile, 0o620); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(writableFile, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
-		t.Fatalf("group-writable file: got %v, want ErrUnsafeLibraryPath", err)
-	}
-	linkPath := filepath.Join(dir, "link.dylib")
-	if err := os.Symlink(writableFile, linkPath); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(linkPath, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
-		t.Fatalf("symlink to group-writable file: got %v, want ErrUnsafeLibraryPath", err)
-	}
+	if runtime.GOOS == "windows" {
+		// UNC/network paths must be rejected.
+		if _, err := Load(`\\server\share\duckdb.dll`, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
+			t.Fatalf("UNC path: got %v, want ErrUnsafeLibraryPath", err)
+		}
+	} else {
+		// Group-writable file rejected, including through a symlink.
+		writableFile := filepath.Join(dir, "writable.dylib")
+		if err := os.WriteFile(writableFile, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(writableFile, 0o620); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(writableFile, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
+			t.Fatalf("group-writable file: got %v, want ErrUnsafeLibraryPath", err)
+		}
+		linkPath := filepath.Join(dir, "link.dylib")
+		if err := os.Symlink(writableFile, linkPath); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(linkPath, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
+			t.Fatalf("symlink to group-writable file: got %v, want ErrUnsafeLibraryPath", err)
+		}
 
-	// Group-writable parent directory rejected.
-	writableDir := filepath.Join(dir, "wdir")
-	if err := os.Mkdir(writableDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	fileInWritableDir := filepath.Join(writableDir, "lib.dylib")
-	if err := os.WriteFile(fileInWritableDir, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(writableDir, 0o720); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Load(fileInWritableDir, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
-		t.Fatalf("group-writable dir: got %v, want ErrUnsafeLibraryPath", err)
+		// Group-writable parent directory rejected.
+		writableDir := filepath.Join(dir, "wdir")
+		if err := os.Mkdir(writableDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fileInWritableDir := filepath.Join(writableDir, "lib.dylib")
+		if err := os.WriteFile(fileInWritableDir, payload, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(writableDir, 0o720); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(fileInWritableDir, goodSum); !errors.Is(err, ErrUnsafeLibraryPath) {
+			t.Fatalf("group-writable dir: got %v, want ErrUnsafeLibraryPath", err)
+		}
 	}
 
 	// Wrong checksum rejected before dlopen.
@@ -194,12 +202,24 @@ func TestLoadPathAndChecksumGuards(t *testing.T) {
 	}
 }
 
+func findCCompiler() (string, error) {
+	if envCC := os.Getenv("CC"); envCC != "" {
+		return exec.LookPath(envCC)
+	}
+	for _, name := range []string{"cc", "gcc", "clang"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("none of cc, gcc, or clang found in PATH")
+}
+
 func TestNativeABILayoutMatchesHeader(t *testing.T) {
 	headerDir := os.Getenv("DUCKDB_HEADER_DIR")
 	if headerDir == "" {
 		t.Skip("DUCKDB_HEADER_DIR not set; skipping C header ABI layout check")
 	}
-	cc, err := exec.LookPath("cc")
+	cc, err := findCCompiler()
 	if err != nil {
 		t.Skipf("C compiler not found: %v", err)
 	}
@@ -234,6 +254,9 @@ int main(void) {
 	tmp := t.TempDir()
 	srcPath := filepath.Join(tmp, "probe.c")
 	binPath := filepath.Join(tmp, "probe")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
 	if err := os.WriteFile(srcPath, []byte(probeSrc), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -244,6 +267,7 @@ int main(void) {
 	if err != nil {
 		t.Fatalf("run ABI probe: %v", err)
 	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
 	want := strings.Join([]string{
 		fmt.Sprintf("size duckdb_result %d %d", unsafe.Sizeof(Result{}), unsafe.Alignof(Result{})),
 		fmt.Sprintf("off duckdb_result.deprecated_error_message %d", unsafe.Offsetof(Result{}.DeprecatedErrorMessage)),
@@ -265,8 +289,8 @@ int main(void) {
 		fmt.Sprintf("size duckdb_timestamp_ms %d %d", unsafe.Sizeof(TimestampMS{}), unsafe.Alignof(TimestampMS{})),
 		fmt.Sprintf("size duckdb_timestamp_ns %d %d", unsafe.Sizeof(TimestampNS{}), unsafe.Alignof(TimestampNS{})),
 	}, "\n") + "\n"
-	if string(out) != want {
-		t.Fatalf("ABI layout mismatch:\ngot C:\n%s\nwant Go:\n%s", out, want)
+	if got != want {
+		t.Fatalf("ABI layout mismatch:\ngot C:\n%s\nwant Go:\n%s", got, want)
 	}
 }
 

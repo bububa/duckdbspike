@@ -3,11 +3,11 @@ package duckdb_test
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -15,40 +15,19 @@ import (
 )
 
 func dirBytesAndFiles(dir string) (int64, int) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0, 0
-	}
 	var total int64
 	var files int
-	for _, e := range entries {
-		if info, err := e.Info(); err == nil && !info.IsDir() {
-			total += info.Size()
+	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if sz, ok := fileLiveSize(p, d); ok {
+			total += sz
 			files++
 		}
-	}
+		return nil
+	})
 	return total, files
-}
-
-func openFDCount() int {
-	dir := "/dev/fd"
-	if runtime.GOOS == "linux" {
-		dir = "/proc/self/fd"
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return -1
-	}
-	return len(entries)
-}
-
-func maxRSSBytes() int64 {
-	var ru syscall.Rusage
-	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &ru)
-	if runtime.GOOS == "linux" {
-		return ru.Maxrss * 1024
-	}
-	return ru.Maxrss
 }
 
 func TestNativeSpillResourceBudgetAndExhaustion(t *testing.T) {

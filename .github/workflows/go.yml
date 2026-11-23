@@ -60,7 +60,15 @@ jobs:
             artifact: libduckdb-osx-universal.zip
             lib: libduckdb.dylib
             sha256: 75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344
+          - os: windows-latest
+            platform: windows/amd64
+            artifact: libduckdb-windows-amd64.zip
+            lib: duckdb.dll
+            sha256: 7e90bdef028d57b45490d6f53530e3c012a5d9abdc4c6723449200663dc84ed0
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
@@ -74,11 +82,13 @@ jobs:
 
       - name: Download DuckDB v1.5.6 native library
         run: |
-          mkdir -m 0700 -p "${RUNNER_TEMP}/duckdb"
+          mkdir -p "${RUNNER_TEMP}/duckdb"
           curl -fsSL "https://github.com/duckdb/duckdb/releases/download/v1.5.6/${{ matrix.artifact }}" -o "${RUNNER_TEMP}/duckdb.zip"
           unzip -q "${RUNNER_TEMP}/duckdb.zip" -d "${RUNNER_TEMP}/duckdb"
-          chmod 0700 "${RUNNER_TEMP}/duckdb"
-          chmod 0700 "${RUNNER_TEMP}/duckdb/${{ matrix.lib }}"
+          if [ "${RUNNER_OS}" != "Windows" ]; then
+            chmod 0700 "${RUNNER_TEMP}/duckdb"
+            chmod 0700 "${RUNNER_TEMP}/duckdb/${{ matrix.lib }}"
+          fi
 
       - name: Build & Vet
         run: |

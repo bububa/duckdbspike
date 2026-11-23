@@ -14,7 +14,7 @@
 | `linux/amd64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-amd64.zip`)   | `3f4962cdd266eab2b479a5b5a4a6d063d279b2954ae814ed00385d553b747633` | MIT     |
 | `linux/arm64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-arm64.zip`)   | `23686593dba4ec22c6e581bb1c843b3964e84c4bc4d0063d8b4daddd2e20e30a` | MIT     |
 | `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
-| `windows/amd64` | Unsupported (unverified)            | —                                               | —                                                                  | —       |
+| `windows/amd64` | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-windows-amd64.zip`) | `7e90bdef028d57b45490d6f53530e3c012a5d9abdc4c6723449200663dc84ed0` | MIT     |
 
 Platforms without a real native acceptance record are rejected at load time with
 `ErrUnsupportedPlatform`. Cross-compilation is not acceptance.
