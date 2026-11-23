@@ -8,11 +8,11 @@
 
 ## Approved Native Artifact & Platform Matrix
 
-| Platform        | Status                              | Artifact                                        | SHA-256 (`libduckdb.dylib`)                                        | License |
+| Platform        | Status                              | Artifact                                        | SHA-256 (shared library)                                           | License |
 | --------------- | ----------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------ | ------- |
 | `darwin/arm64`  | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-osx-universal.zip`) | `75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344` | MIT     |
-| `linux/amd64`   | Unsupported (unverified)            | —                                               | —                                                                  | —       |
-| `linux/arm64`   | Unsupported (unverified)            | —                                               | —                                                                  | —       |
+| `linux/amd64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-amd64.zip`)   | `3f4962cdd266eab2b479a5b5a4a6d063d279b2954ae814ed00385d553b747633` | MIT     |
+| `linux/arm64`   | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-linux-arm64.zip`)   | `23686593dba4ec22c6e581bb1c843b3964e84c4bc4d0063d8b4daddd2e20e30a` | MIT     |
 | `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 | `windows/amd64` | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 
