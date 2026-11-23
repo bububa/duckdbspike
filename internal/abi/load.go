@@ -123,6 +123,9 @@ func checkLibraryPath(path string) (string, error) {
 	if strings.IndexByte(path, 0) >= 0 {
 		return "", fmt.Errorf("%w: path contains NUL", ErrUnsafeLibraryPath)
 	}
+	if err := checkLibraryPathPrefix(path); err != nil {
+		return "", err
+	}
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("%w: %q is not absolute", ErrUnsafeLibraryPath, path)
 	}
@@ -137,15 +140,8 @@ func checkLibraryPath(path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("%w: %s is not a regular file", ErrUnsafeLibraryPath, resolved)
 	}
-	if info.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("%w: %s is group/world writable", ErrUnsafeLibraryPath, resolved)
-	}
-	dirInfo, err := os.Stat(filepath.Dir(resolved))
-	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrUnsafeLibraryPath, err)
-	}
-	if dirInfo.Mode().Perm()&0o022 != 0 {
-		return "", fmt.Errorf("%w: directory of %s is group/world writable", ErrUnsafeLibraryPath, resolved)
+	if err := checkLibraryPermissions(resolved, info); err != nil {
+		return "", err
 	}
 	return resolved, nil
 }

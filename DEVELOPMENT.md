@@ -15,7 +15,8 @@ Minimal, `CGO_ENABLED=0` [`purego`](https://github.com/ebitengine/purego) bindin
   - `types.go` — `PinnedVersion`, C struct mirrors (`Result`, `Hugeint`, `Uhugeint`, `Decimal`, `StringT`, `ListEntry`, temporal types), and C enum constants.
   - `api.go` — Complete `API` function-pointer table with ownership annotations (`owned` vs `borrowed`) and `symbols()` registry.
   - `load.go` — `Load(path, wantSHA256)`: platform gate, path/permission checks, SHA-256 verification, atomic all-or-nothing symbol resolution, and `PinnedVersion` check.
-  - `platform_accepted.go` / `platform_other.go` — Build-tag gate (`darwin/arm64`, `linux/amd64`, `linux/arm64`).
+  - `platform_accepted.go` / `platform_windows_amd64.go` / `platform_other.go` — Build-tag gate (`darwin/arm64`, `linux/amd64`, `linux/arm64`, `windows/amd64`) and native library openers (`purego.Dlopen` on Unix, `syscall.LoadLibrary` on Windows).
+  - `perms_unix.go` / `perms_windows.go` — OS-specific library path/permission guards (POSIX `0o022` check on Unix, UNC path rejection on Windows).
   - `abi_test.go` — Symbol coverage check, loader validation tests, C header layout probe (`DUCKDB_HEADER_DIR`), and native load test.
 - `duckdb/` — Public Go API and resource/safety kernel.
   - `doc.go` — Package docs, sentinel errors, `Error`/`ErrorKind`, `noCopy`.
