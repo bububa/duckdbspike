@@ -1,17 +1,20 @@
-# github.com/bububa/duckdbspike
+# DuckDB Spike
 
-Minimal, `CGO_ENABLED=0` purego binding for a single pinned DuckDB native C API
-release, designed for read-only telemetry reporting.
+[![Go Reference](https://pkg.go.dev/badge/github.com/bububa/duckdbspike.svg)](https://pkg.go.dev/github.com/bububa/duckdbspike)
+[![Go Report Card](https://goreportcard.com/badge/github.com/bububa/duckdbspike)](https://goreportcard.com/report/github.com/bububa/duckdbspike)
+[![CI](https://github.com/bububa/duckdbspike/actions/workflows/go.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/go.yml)
+
+> Minimal, `CGO_ENABLED=0` purego binding for a single pinned DuckDB native C API release, designed for read-only telemetry reporting.
 
 ## Approved Native Artifact & Platform Matrix
 
-| Platform | Status | Artifact | SHA-256 (`libduckdb.dylib`) | License |
-|---|---|---|---|---|
-| `darwin/arm64` | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-osx-universal.zip`) | `75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344` | MIT |
-| `linux/amd64` | Unsupported (unverified) | — | — | — |
-| `linux/arm64` | Unsupported (unverified) | — | — | — |
-| `darwin/amd64` | Unsupported (unverified) | — | — | — |
-| `windows/amd64` | Unsupported (unverified) | — | — | — |
+| Platform        | Status                              | Artifact                                        | SHA-256 (`libduckdb.dylib`)                                        | License |
+| --------------- | ----------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------ | ------- |
+| `darwin/arm64`  | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-osx-universal.zip`) | `75a519cb914ae36ca22cff0995a8a2e8c9a46990b8c0a479514f741a0d93f344` | MIT     |
+| `linux/amd64`   | Unsupported (unverified)            | —                                               | —                                                                  | —       |
+| `linux/arm64`   | Unsupported (unverified)            | —                                               | —                                                                  | —       |
+| `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
+| `windows/amd64` | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 
 Platforms without a real native acceptance record are rejected at load time with
 `ErrUnsupportedPlatform`. Cross-compilation is not acceptance.

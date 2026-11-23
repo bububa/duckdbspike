@@ -1,6 +1,12 @@
 # If you prefer the allow list template instead of the deny list, see community template:
 # https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
+
+
+# Compiled Object files, Static and Dynamic libs (Shared Objects)
+*.o
+*.a
+*.so
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -10,6 +16,17 @@
 
 # Test binary, built with `go test -c`
 *.test
+*.prof
+
+ # Architecture specific extensions/prefixes
+*.[568vq]
+[568vq].out
+
+*.cgo1.go
+*.cgo2.c
+_cgo_defun.c
+_cgo_gotypes.go
+_cgo_export.*
 
 # Code coverage profiles and other test artifacts
 *.out
@@ -30,5 +47,9 @@ go.work.sum
 .env
 
 # Editor/IDE
-# .idea/
-# .vscode/
+.idea/
+.vscode/
+#
+
+.DS_Store
+*/.DS_Store
