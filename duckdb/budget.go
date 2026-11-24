@@ -363,7 +363,7 @@ func valueBytes(v Value) uint64 {
 	case TypeBlob, TypeBit, TypeBignum, TypeGeometry:
 		b, _ := v.ref.([]byte)
 		return 24 + uint64(len(b))
-	case TypeUnion:
+	case TypeUnion, TypeVariant:
 		inner, _ := v.ref.(Value)
 		return 24 + valueBytes(inner)
 	case TypeList:

@@ -148,7 +148,7 @@ func TestValueRangeCheckedConversionsAndIsolation(t *testing.T) {
 func TestDecodeOverflowGuardsAndZeroLeaksOnTypeFailure(t *testing.T) {
 	ctx := context.Background()
 
-	// Nested STRUCT whose second field is unsupported (VARIANT) must destroy
+	// Nested STRUCT whose second field is unsupported (ANY) must destroy
 	// every allocated child logical type and free child name strings.
 	t.Run("nested_unsupported_struct_zero_leaks", func(t *testing.T) {
 		f, lib := newFakeNative(t)
@@ -176,7 +176,7 @@ func TestDecodeOverflowGuardsAndZeroLeaksOnTypeFailure(t *testing.T) {
 				f.ltypes[child0] = abi.TypeBigint
 				return child0
 			}
-			f.ltypes[child1] = abi.TypeVariant
+			f.ltypes[child1] = abi.TypeAny
 			return child1
 		}
 

@@ -54,6 +54,7 @@ const (
 	TypeStruct
 	TypeMap
 	TypeUnion
+	TypeVariant
 
 	// typeDefault is an internal sentinel kind used exclusively by DefaultValue()
 	// to request SQL column DEFAULT evaluation in Appender.AppendRow.
@@ -138,6 +139,8 @@ func (k TypeKind) String() string {
 		return "MAP"
 	case TypeUnion:
 		return "UNION"
+	case TypeVariant:
+		return "VARIANT"
 	default:
 		return "INVALID"
 	}
@@ -1134,6 +1137,17 @@ type UnionValue struct {
 	Value   Value
 }
 
+// Variant holds the decoded inner value of a non-NULL DuckDB VARIANT row.
+// Outer SQL NULL rows decode as Value.IsNull() == true (Kind() == TypeVariant),
+// whereas an inner DuckDB VARIANT_NULL decodes as a non-NULL VARIANT whose
+// Variant.IsNull() is true (Value.Kind() == TypeSQLNull).
+type Variant struct {
+	Value Value
+}
+
+// IsNull reports whether v holds an inner VARIANT_NULL value.
+func (v Variant) IsNull() bool { return v.Value.IsNull() }
+
 // Value holds one SQL parameter or decoded column value with exact type and
 // explicit SQL NULL state. All composite/byte data inside a Value is owned by
 // Go and never aliases native chunk memory.
@@ -1549,6 +1563,13 @@ func GeometryValue(g Geometry) Value {
 		lt = cloneLogicalType(GeometryType(g.CRS))
 	}
 	return Value{kind: uint8(TypeGeometry), ref: cp, lt: lt}
+}
+
+// VariantValue wraps a decoded inner Value as a non-NULL TypeVariant Value.
+// Passing NullValue() (or TypedNullValue(ScalarType(TypeSQLNull))) represents
+// an inner VARIANT_NULL distinct from an outer SQL NULL (TypedNullValue(ScalarType(TypeVariant))).
+func VariantValue(inner Value) Value {
+	return Value{kind: uint8(TypeVariant), ref: inner}
 }
 
 // NewUnionValue validates unionType, tag, and member value and constructs an
@@ -1972,4 +1993,18 @@ func (v Value) Union() (UnionValue, error) {
 		TagName: tagName,
 		Value:   inner,
 	}, nil
+}
+
+// Variant returns the decoded inner Variant payload. Returns ErrNullValue for
+// outer SQL NULL VARIANT rows; inner VARIANT_NULL rows return a Variant with
+// Variant.IsNull() == true.
+func (v Value) Variant() (Variant, error) {
+	if err := v.check(TypeVariant); err != nil {
+		return Variant{}, err
+	}
+	inner, ok := v.ref.(Value)
+	if !ok {
+		return Variant{Value: TypedNullValue(ScalarType(TypeSQLNull))}, nil
+	}
+	return Variant{Value: inner}, nil
 }

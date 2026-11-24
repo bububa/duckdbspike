@@ -348,6 +348,9 @@ func ValueAs[T any](v Value) (T, error) {
 	case UnionValue:
 		x, err := v.Union()
 		return any(x).(T), err
+	case Variant:
+		x, err := v.Variant()
+		return any(x).(T), err
 	case ListValue:
 		x, err := v.List()
 		return any(x).(T), err

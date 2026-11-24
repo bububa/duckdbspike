@@ -345,24 +345,29 @@ func TestNativeUnsupportedTypesRejectedEvenAllNullOrEmpty(t *testing.T) {
 		"SELECT NULL::VARIANT AS empty_res WHERE false",
 	}
 	for _, q := range queries {
-		// Stmt.Columns() rejects at prepare time.
+		// VARIANT is now supported in read-only decoding even when NULL or empty.
 		stmt, err := conn.Prepare(ctx, q)
 		if err != nil {
 			t.Fatalf("Prepare(%q): %v", q, err)
 		}
-		if _, err := stmt.Columns(); !errors.Is(err, duckdb.ErrUnsupportedType) {
+		if _, err := stmt.Columns(); err != nil {
 			_ = stmt.Close()
-			t.Fatalf("Stmt.Columns(%q) = %v, want ErrUnsupportedType", q, err)
+			t.Fatalf("Stmt.Columns(%q) unexpected error: %v", q, err)
 		}
 		_ = stmt.Close()
 
-		// Conn.Query() also rejects before returning Rows.
-		if rows, err := conn.Query(ctx, q); !errors.Is(err, duckdb.ErrUnsupportedType) {
-			if rows != nil {
-				_ = rows.Close()
-			}
-			t.Fatalf("Query(%q) = %v, want ErrUnsupportedType", q, err)
+		rows, err := conn.Query(ctx, q)
+		if err != nil {
+			t.Fatalf("Query(%q) unexpected error: %v", q, err)
 		}
+		_ = rows.Close()
+	}
+	// Read-only types (VARIANT, GEOMETRY) remain explicitly rejected on bind.
+	if _, err := conn.Query(ctx, "SELECT ?", duckdb.VariantValue(duckdb.Int32Value(1))); !errors.Is(err, duckdb.ErrUnsupportedType) {
+		t.Fatalf("binding VARIANT = %v, want ErrUnsupportedType", err)
+	}
+	if _, err := conn.Query(ctx, "SELECT ?", duckdb.GeometryValue(duckdb.Geometry{WKB: []byte{1}})); !errors.Is(err, duckdb.ErrUnsupportedType) {
+		t.Fatalf("binding GEOMETRY = %v, want ErrUnsupportedType", err)
 	}
 }
 

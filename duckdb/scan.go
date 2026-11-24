@@ -262,6 +262,18 @@ func (u *UnionValue) Scan(src any) error {
 	return scanExact(u, src, "duckdb.UnionValue")
 }
 
+func (vr *Variant) Scan(src any) error {
+	if v, ok := src.(Value); ok {
+		x, err := v.Variant()
+		if err != nil {
+			return err
+		}
+		*vr = x
+		return nil
+	}
+	return scanExact(vr, src, "duckdb.Variant")
+}
+
 func (l *ListValue) Scan(src any) error {
 	if v, ok := src.(Value); ok {
 		x, err := v.List()

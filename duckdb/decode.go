@@ -151,6 +151,11 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			}
 		}
 		plan = columnPlan{lt: GeometryType(crs)}
+	case abi.TypeVariant:
+		if err := validateVariantLogicalType(api, lt); err != nil {
+			return columnPlan{}, err
+		}
+		plan = columnPlan{lt: ScalarType(TypeVariant)}
 	case abi.TypeDecimal:
 		width := api.DecimalWidth(lt)
 		scale := api.DecimalScale(lt)
@@ -330,6 +335,37 @@ func copyNativeBytes(base uintptr, length uint64) ([]byte, error) {
 	return out, nil
 }
 
+// decodeBignumWire decodes DuckDB's 3-byte sortable header + big-endian
+// magnitude wire representation into an owned immutable Bignum without
+// mutating raw.
+func decodeBignumWire(raw []byte) (Bignum, error) {
+	if len(raw) < 3 {
+		return Bignum{}, fmt.Errorf("%w: truncated BIGNUM wire payload (%d bytes)", ErrInvalidInput, len(raw))
+	}
+	isNeg := raw[0]&0x80 == 0
+	src := raw[3:]
+	var mag []byte
+	if len(src) > 0 {
+		mag = make([]byte, len(src))
+		if isNeg {
+			for i, b := range src {
+				mag[i] = ^b
+			}
+		} else {
+			copy(mag, src)
+		}
+		trim := 0
+		for trim < len(mag) && mag[trim] == 0 {
+			trim++
+		}
+		mag = mag[trim:]
+	}
+	if len(mag) == 0 {
+		return Bignum{}, nil
+	}
+	return Bignum{neg: isNeg, mag: mag}, nil
+}
+
 func attachPlanAlias(v Value, plan *columnPlan) Value {
 	if plan.lt.Alias != "" && v.lt == nil {
 		v.lt = &plan.lt
@@ -396,6 +432,13 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			ref:  v,
 			lt:   &plan.lt,
 		}, nil
+
+	case TypeVariant:
+		v, err := decodeVariantValue(api, vec, row, limits)
+		if err != nil {
+			return Value{}, err
+		}
+		return attachPlanAlias(v, plan), nil
 
 	case TypeArray:
 		size := plan.lt.ArraySize
@@ -515,29 +558,11 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			}
 			return attachPlanAlias(Value{kind: uint8(TypeBit), ref: raw}, plan), nil
 		case TypeBignum:
-			if len(raw) < 3 {
-				return Value{}, fmt.Errorf("%w: truncated BIGNUM wire payload (%d bytes)", ErrInvalidInput, len(raw))
+			bn, err := decodeBignumWire(raw)
+			if err != nil {
+				return Value{}, err
 			}
-			isNeg := raw[0]&0x80 == 0
-			mag := raw[3:]
-			if isNeg {
-				for i := range mag {
-					mag[i] = ^mag[i]
-				}
-			}
-			for len(mag) > 0 && mag[0] == 0 {
-				mag = mag[1:]
-			}
-			var neg uint64
-			if isNeg && len(mag) > 0 {
-				neg = 1
-			}
-			var owned []byte
-			if len(mag) > 0 {
-				owned = make([]byte, len(mag))
-				copy(owned, mag)
-			}
-			return attachPlanAlias(Value{kind: uint8(TypeBignum), lo: neg, ref: owned}, plan), nil
+			return attachPlanAlias(BignumValue(bn), plan), nil
 		default: // TypeGeometry
 			var lt *LogicalType
 			if plan.lt.needsHeapMeta() {

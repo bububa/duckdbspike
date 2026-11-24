@@ -216,6 +216,7 @@ func isDirectScalarStructType(t reflect.Type) bool {
 		reflect.TypeFor[duckdb.Bignum](),
 		reflect.TypeFor[duckdb.Geometry](),
 		reflect.TypeFor[duckdb.UnionValue](),
+		reflect.TypeFor[duckdb.Variant](),
 		reflect.TypeFor[duckdb.ListValue](),
 		reflect.TypeFor[duckdb.ArrayValue](),
 		reflect.TypeFor[duckdb.StructValue](),
@@ -439,6 +440,8 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 		return v.Map()
 	case duckdb.TypeUnion:
 		return v.Union()
+	case duckdb.TypeVariant:
+		return v.Variant()
 	default:
 		return nil, fmt.Errorf("%w: %s", duckdb.ErrUnsupportedType, v.Kind())
 	}
@@ -516,6 +519,8 @@ func scanTypeForLogicalType(lt duckdb.LogicalType, scanTime bool) reflect.Type {
 		return reflect.TypeFor[duckdb.MapValue]()
 	case duckdb.TypeUnion:
 		return reflect.TypeFor[duckdb.UnionValue]()
+	case duckdb.TypeVariant:
+		return reflect.TypeFor[duckdb.Variant]()
 	default:
 		return reflect.TypeFor[any]()
 	}
