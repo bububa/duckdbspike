@@ -48,6 +48,7 @@ type columnPlan struct {
 	lt              LogicalType
 	decimalInternal int32
 	enumInternal    int32
+	enumLookup      map[string]uint32
 	elem            *columnPlan
 	key             *columnPlan
 	val             *columnPlan
@@ -184,6 +185,7 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			return columnPlan{}, fmt.Errorf("%w: enum dictionary size %d exceeds %d", ErrLimitExceeded, dictSize, limits.MaxCollectionLen)
 		}
 		values := make([]string, int(dictSize))
+		lookup := make(map[string]uint32, int(dictSize))
 		for i := uint64(0); i < dictSize; i++ {
 			ptr := api.EnumDictionaryValue(lt, i)
 			label := abi.GoString(ptr)
@@ -194,10 +196,12 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 				return columnPlan{}, fmt.Errorf("%w: enum label length %d exceeds %d", ErrLimitExceeded, len(label), limits.MaxValueBytes)
 			}
 			values[i] = label
+			lookup[label] = uint32(i)
 		}
 		plan = columnPlan{
 			lt:           LogicalType{Kind: TypeEnum, EnumValues: values},
 			enumInternal: internal,
+			enumLookup:   lookup,
 		}
 	case abi.TypeList:
 		childLT := api.ListTypeChildType(lt)

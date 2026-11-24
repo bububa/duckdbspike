@@ -15,11 +15,15 @@ import (
 // ErrBusy to concurrent operations) until Close. Callers must call Close to
 // flush remaining buffered rows and release native resources.
 type Appender struct {
-	_       noCopy
-	conn    *Conn
-	handle  uintptr
-	columns []Column
-	closed  bool
+	_        noCopy
+	conn     *Conn
+	handle   uintptr
+	columns  []Column
+	plans    []columnPlan
+	chunk    uintptr
+	chunkCap uint64
+	chunkRow uint64
+	closed   bool
 }
 
 // NewAppender opens an exclusive bulk Appender targeting catalog.schema.table.
@@ -229,16 +233,30 @@ func (a *Appender) refreshColumnsLocked() error {
 		return fmt.Errorf("%w: appender column count %d overflows int", ErrInvalidInput, n)
 	}
 	cols := make([]Column, int(n))
+	plans := make([]columnPlan, int(n))
+	nativeTypes := make([]uintptr, int(n))
+	defer func() {
+		for i := range nativeTypes {
+			if nativeTypes[i] != 0 {
+				api.DestroyLogicalType(&nativeTypes[i])
+			}
+		}
+	}()
 	for i := uint64(0); i < n; i++ {
 		lt := api.AppenderColumnType(a.handle, i)
+		nativeTypes[i] = lt
 		plan, err := buildColumnPlan(api, lt, 0, a.conn.limits)
-		api.DestroyLogicalType(&lt)
 		if err != nil {
 			return fmt.Errorf("appender column %d: %w", i, err)
 		}
 		cols[i] = Column{Type: plan.lt}
+		plans[i] = plan
+	}
+	if err := a.initChunkLocked(nativeTypes); err != nil {
+		return err
 	}
 	a.columns = cols
+	a.plans = plans
 	return nil
 }
 
@@ -278,6 +296,9 @@ func (a *Appender) AddColumn(name string) error {
 	if a.closed || c.closed {
 		return ErrClosed
 	}
+	if err := a.flushChunkLocked(); err != nil {
+		return err
+	}
 	state := c.api.AppenderAddColumn(a.handle, &cname[0])
 	runtime.KeepAlive(cname)
 	if state != abi.StateSuccess {
@@ -297,6 +318,9 @@ func (a *Appender) ClearColumns() error {
 	if a.closed || c.closed {
 		return ErrClosed
 	}
+	if err := a.flushChunkLocked(); err != nil {
+		return err
+	}
 	if c.api.AppenderClearColumns(a.handle) != abi.StateSuccess {
 		return a.errorLocked("appender_clear_columns")
 	}
@@ -305,6 +329,8 @@ func (a *Appender) ClearColumns() error {
 
 // AppendRow appends one complete row to the appender buffer. Use NullValue()
 // for SQL NULL and DefaultValue() to evaluate the column's SQL DEFAULT.
+// Rows are buffered in a reusable native DataChunk (up to duckdb_vector_size())
+// and flushed via duckdb_append_data_chunk automatically.
 func (a *Appender) AppendRow(vals ...Value) error {
 	if a == nil {
 		return ErrClosed
@@ -315,15 +341,44 @@ func (a *Appender) AppendRow(vals ...Value) error {
 	if a.closed || c.closed {
 		return ErrClosed
 	}
+	return a.appendRowLocked(vals)
+}
+
+// AppendRows appends a batch of rows while holding the connection lock once,
+// buffering them into the reusable native DataChunk and flushing automatically
+// at chunk boundaries. If row i fails validation, prior rows in the batch
+// remain buffered and the error is returned immediately.
+func (a *Appender) AppendRows(rows [][]Value) error {
+	if a == nil {
+		return ErrClosed
+	}
+	c := a.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a.closed || c.closed {
+		return ErrClosed
+	}
+	for i, vals := range rows {
+		if err := a.appendRowLocked(vals); err != nil {
+			return fmt.Errorf("row %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+func (a *Appender) appendRowLocked(vals []Value) error {
 	if len(vals) != len(a.columns) {
 		return fmt.Errorf("%w: appender expects %d values per row, got %d", ErrInvalidInput, len(a.columns), len(vals))
+	}
+	if a.chunk != 0 {
+		return a.appendRowChunkLocked(vals)
 	}
 	for i, v := range vals {
 		if err := a.appendOneLocked(i, v); err != nil {
 			return err
 		}
 	}
-	if c.api.AppenderEndRow(a.handle) != abi.StateSuccess {
+	if a.conn.api.AppenderEndRow(a.handle) != abi.StateSuccess {
 		return a.errorLocked("appender_end_row")
 	}
 	return nil
@@ -432,6 +487,9 @@ func (a *Appender) AppendArrowChunk(schema *ArrowSchema, array *ArrowArray) erro
 	if a.closed || c.closed {
 		return ErrClosed
 	}
+	if err := a.flushChunkLocked(); err != nil {
+		return err
+	}
 	api := c.api
 	var converted uintptr
 	if err := consumeErrorData(api, "schema_from_arrow", api.SchemaFromArrow(c.handle, schema.raw, &converted)); err != nil {
@@ -470,6 +528,9 @@ func (a *Appender) Flush() error {
 	if a.closed || c.closed {
 		return ErrClosed
 	}
+	if err := a.flushChunkLocked(); err != nil {
+		return err
+	}
 	if c.api.AppenderFlush(a.handle) != abi.StateSuccess {
 		return a.errorLocked("appender_flush")
 	}
@@ -486,6 +547,10 @@ func (a *Appender) Clear() error {
 	defer c.mu.Unlock()
 	if a.closed || c.closed {
 		return ErrClosed
+	}
+	if a.chunk != 0 && a.chunkRow > 0 {
+		c.api.DataChunkReset(a.chunk)
+		a.chunkRow = 0
 	}
 	if c.api.AppenderClear(a.handle) != abi.StateSuccess {
 		return a.errorLocked("appender_clear")
@@ -513,12 +578,18 @@ func (a *Appender) releaseLocked() error {
 	api := a.conn.api
 	var closeErr error
 	if a.handle != 0 {
-		if api.AppenderClose(a.handle) != abi.StateSuccess {
+		if err := a.flushChunkLocked(); err != nil {
+			closeErr = err
+		}
+		a.destroyChunkLocked()
+		if api.AppenderClose(a.handle) != abi.StateSuccess && closeErr == nil {
 			closeErr = a.errorLocked("appender_close")
 		}
 		if api.AppenderDestroy(&a.handle) != abi.StateSuccess && closeErr == nil {
 			closeErr = nativeError("appender_destroy", abi.ErrorInvalid, "")
 		}
+	} else {
+		a.destroyChunkLocked()
 	}
 	if a.conn.activeAppender == a {
 		a.conn.activeAppender = nil

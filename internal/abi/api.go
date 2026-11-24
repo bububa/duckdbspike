@@ -286,16 +286,26 @@ type API struct {
 	DestroyLogicalType func(logicalType *uintptr)
 
 	// Vectors and their data are borrowed from the owning chunk.
-	DataChunkGetSize        func(chunk uintptr) uint64
-	DataChunkGetColumnCount func(chunk uintptr) uint64
-	DataChunkGetVector      func(chunk uintptr, column uint64) uintptr
-	DestroyDataChunk        func(chunk *uintptr)
-	VectorGetData           func(vector uintptr) uintptr
-	VectorGetValidity       func(vector uintptr) uintptr
-	ListVectorGetChild      func(vector uintptr) uintptr
-	ListVectorGetSize       func(vector uintptr) uint64
-	StructVectorGetChild    func(vector uintptr, index uint64) uintptr
-	ArrayVectorGetChild     func(vector uintptr) uintptr
+	// CreateDataChunk allocates an owned duckdb_data_chunk released by
+	// DestroyDataChunk.
+	VectorSize                         func() uint64
+	CreateDataChunk                    func(types *uintptr, columnCount uint64) uintptr
+	DataChunkReset                     func(chunk uintptr)
+	DataChunkSetSize                   func(chunk uintptr, size uint64)
+	DataChunkGetSize                   func(chunk uintptr) uint64
+	DataChunkGetColumnCount            func(chunk uintptr) uint64
+	DataChunkGetVector                 func(chunk uintptr, column uint64) uintptr
+	DestroyDataChunk                   func(chunk *uintptr)
+	VectorGetData                      func(vector uintptr) uintptr
+	VectorGetValidity                  func(vector uintptr) uintptr
+	VectorEnsureValidityWritable       func(vector uintptr)
+	UnsafeVectorAssignStringElementLen func(vector uintptr, index uint64, str *byte, strLen uint64)
+	ListVectorGetChild                 func(vector uintptr) uintptr
+	ListVectorGetSize                  func(vector uintptr) uint64
+	ListVectorReserve                  func(vector uintptr, requiredCapacity uint64) int32
+	ListVectorSetSize                  func(vector uintptr, size uint64) int32
+	StructVectorGetChild               func(vector uintptr, index uint64) uintptr
+	ArrayVectorGetChild                func(vector uintptr) uintptr
 
 	// AppenderCreateExt always allocates an owned appender released by
 	// AppenderDestroy, even on failure. AppenderColumnType returns an owned
@@ -313,6 +323,7 @@ type API struct {
 	AppenderClearColumns func(appender uintptr) int32
 	AppenderEndRow       func(appender uintptr) int32
 	AppendDefault        func(appender uintptr) int32
+	AppendDefaultToChunk func(appender uintptr, chunk uintptr, col uint64, row uint64) int32
 	AppendNull           func(appender uintptr) int32
 	AppendBool           func(appender uintptr, value bool) int32
 	AppendInt8           func(appender uintptr, value int8) int32
@@ -610,14 +621,22 @@ func (a *API) symbols() []symbol {
 		{&a.CreateUnionType, "duckdb_create_union_type"},
 		{&a.CreateEnumType, "duckdb_create_enum_type"},
 		{&a.DestroyLogicalType, "duckdb_destroy_logical_type"},
+		{&a.VectorSize, "duckdb_vector_size"},
+		{&a.CreateDataChunk, "duckdb_create_data_chunk"},
+		{&a.DataChunkReset, "duckdb_data_chunk_reset"},
+		{&a.DataChunkSetSize, "duckdb_data_chunk_set_size"},
 		{&a.DataChunkGetSize, "duckdb_data_chunk_get_size"},
 		{&a.DataChunkGetColumnCount, "duckdb_data_chunk_get_column_count"},
 		{&a.DataChunkGetVector, "duckdb_data_chunk_get_vector"},
 		{&a.DestroyDataChunk, "duckdb_destroy_data_chunk"},
 		{&a.VectorGetData, "duckdb_vector_get_data"},
 		{&a.VectorGetValidity, "duckdb_vector_get_validity"},
+		{&a.VectorEnsureValidityWritable, "duckdb_vector_ensure_validity_writable"},
+		{&a.UnsafeVectorAssignStringElementLen, "duckdb_unsafe_vector_assign_string_element_len"},
 		{&a.ListVectorGetChild, "duckdb_list_vector_get_child"},
 		{&a.ListVectorGetSize, "duckdb_list_vector_get_size"},
+		{&a.ListVectorReserve, "duckdb_list_vector_reserve"},
+		{&a.ListVectorSetSize, "duckdb_list_vector_set_size"},
 		{&a.StructVectorGetChild, "duckdb_struct_vector_get_child"},
 		{&a.ArrayVectorGetChild, "duckdb_array_vector_get_child"},
 		{&a.AppenderCreateExt, "duckdb_appender_create_ext"},
@@ -633,6 +652,7 @@ func (a *API) symbols() []symbol {
 		{&a.AppenderClearColumns, "duckdb_appender_clear_columns"},
 		{&a.AppenderEndRow, "duckdb_appender_end_row"},
 		{&a.AppendDefault, "duckdb_append_default"},
+		{&a.AppendDefaultToChunk, "duckdb_append_default_to_chunk"},
 		{&a.AppendNull, "duckdb_append_null"},
 		{&a.AppendBool, "duckdb_append_bool"},
 		{&a.AppendInt8, "duckdb_append_int8"},
