@@ -46,6 +46,43 @@ func (v ArrowSchemaView) Flags() int64 {
 	return v.raw.Flags
 }
 
+// MetadataBytes returns a Go-owned copy of the raw Arrow C Data Interface
+// metadata buffer (length-prefixed int32 key/value pairs), or nil if no
+// metadata is attached.
+func (v ArrowSchemaView) MetadataBytes() []byte {
+	if v.raw == nil || v.raw.Metadata == 0 {
+		return nil
+	}
+	const maxMetadataBytes = 16 << 20
+	base := abi.Pointer(v.raw.Metadata)
+	count := *(*int32)(base)
+	if count <= 0 || count > 1<<20 {
+		return nil
+	}
+	off := uintptr(4)
+	for i := int32(0); i < count; i++ {
+		if off+4 > maxMetadataBytes {
+			return nil
+		}
+		klen := *(*int32)(unsafe.Add(base, off))
+		if klen < 0 || uintptr(klen) > maxMetadataBytes-off-4 {
+			return nil
+		}
+		off += 4 + uintptr(klen)
+		if off+4 > maxMetadataBytes {
+			return nil
+		}
+		vlen := *(*int32)(unsafe.Add(base, off))
+		if vlen < 0 || uintptr(vlen) > maxMetadataBytes-off-4 {
+			return nil
+		}
+		off += 4 + uintptr(vlen)
+	}
+	out := make([]byte, int(off))
+	copy(out, unsafe.Slice((*byte)(base), int(off)))
+	return out
+}
+
 // ChildCount returns the number of child schema nodes.
 func (v ArrowSchemaView) ChildCount() int {
 	if v.raw == nil || v.raw.NChildren <= 0 {
@@ -137,6 +174,22 @@ func (s *ArrowSchema) Released() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.released
+}
+
+func (s *ArrowSchema) takeOwnership() (*abi.ArrowSchema, func(*abi.ArrowSchema)) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.released || s.raw == nil {
+		return nil, nil
+	}
+	raw, rel := s.raw, s.release
+	s.raw = nil
+	s.release = nil
+	s.released = true
+	return raw, rel
 }
 
 // Release invokes the native ArrowSchema release callback. Idempotent.
@@ -321,6 +374,22 @@ func (a *ArrowArray) Released() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.released
+}
+
+func (a *ArrowArray) takeOwnership() (*abi.ArrowArray, func(*abi.ArrowArray)) {
+	if a == nil {
+		return nil, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.released || a.raw == nil {
+		return nil, nil
+	}
+	raw, rel := a.raw, a.release
+	a.raw = nil
+	a.release = nil
+	a.released = true
+	return raw, rel
 }
 
 // Release invokes the native ArrowArray release callback. Idempotent.

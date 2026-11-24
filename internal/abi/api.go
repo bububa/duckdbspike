@@ -19,6 +19,11 @@ type API struct {
 	CreateConfig  func(out *uintptr) int32
 	SetConfig     func(config uintptr, name, option *byte) int32
 	DestroyConfig func(config *uintptr)
+	// ConfigCount returns the total number of DuckDB configuration flags.
+	// GetConfigFlag writes borrowed static C string pointers into outName and
+	// outDescription; callers must NOT free them.
+	ConfigCount   func() uintptr
+	GetConfigFlag func(index uintptr, outName *uintptr, outDescription *uintptr) int32
 
 	// OpenExt allocates an owned database released by Close. outError, when
 	// set, is an owned C string released by Free, on success or failure.
@@ -69,6 +74,11 @@ type API struct {
 	ExtractStatementsError    func(extracted uintptr) uintptr
 	DestroyExtracted          func(extracted *uintptr)
 	NParams                   func(statement uintptr) uint64
+	// ParamLogicalType returns an OWNED logical type released by DestroyLogicalType
+	// (or 0 if out of range or not prepared).
+	ParamLogicalType func(statement uintptr, paramIdx uint64) uintptr
+	// PreparedStatementType returns the duckdb_statement_type enum for statement.
+	PreparedStatementType func(statement uintptr) int32
 	// ParameterName returns an OWNED C string released by Free (or 0 if out of range).
 	ParameterName      func(statement uintptr, index uint64) uintptr
 	BindParameterIndex func(statement uintptr, paramIdxOut *uint64, name *byte) int32
@@ -77,6 +87,20 @@ type API struct {
 	PreparedStatementColumnCount       func(statement uintptr) uint64
 	PreparedStatementColumnName        func(statement uintptr, colIdx uint64) uintptr
 	PreparedStatementColumnLogicalType func(statement uintptr, colIdx uint64) uintptr
+
+	// TableDescriptionCreateExt always allocates an owned table description
+	// released by TableDescriptionDestroy, even when it returns StateError.
+	// TableDescriptionError returns a borrowed C string valid until destroy.
+	// TableDescriptionGetColumnName returns an owned C string released by Free.
+	// TableDescriptionGetColumnType returns an owned logical type released by
+	// DestroyLogicalType.
+	TableDescriptionCreateExt      func(connection uintptr, catalog, schema, table *byte, out *uintptr) int32
+	TableDescriptionDestroy        func(tableDescription *uintptr)
+	TableDescriptionError          func(tableDescription uintptr) uintptr
+	TableDescriptionGetColumnCount func(tableDescription uintptr) uint64
+	TableDescriptionGetColumnName  func(tableDescription uintptr, index uint64) uintptr
+	TableDescriptionGetColumnType  func(tableDescription uintptr, index uint64) uintptr
+	ColumnHasDefault               func(tableDescription uintptr, index uint64, out *bool) int32
 
 	BindNull          func(statement uintptr, index uint64) int32
 	BindBoolean       func(statement uintptr, index uint64, value bool) int32
@@ -279,6 +303,12 @@ type API struct {
 	SchemaFromArrow             func(connection uintptr, schema *ArrowSchema, outConverted *uintptr) uintptr
 	DataChunkFromArrow          func(connection uintptr, array *ArrowArray, converted uintptr, outChunk *uintptr) uintptr
 	DestroyArrowConvertedSchema func(converted *uintptr)
+	// ArrowArrayScan registers a single-use temporary Arrow view backed by
+	// arrowSchema and arrowArray and allocates an owned duckdb_arrow_stream
+	// released by DestroyArrowStream. DuckDB borrows arrowSchema and arrowArray
+	// until the view is dropped and the stream is destroyed.
+	ArrowArrayScan     func(connection uintptr, tableName *byte, arrowSchema *ArrowSchema, arrowArray *ArrowArray, outStream *uintptr) int32
+	DestroyArrowStream func(stream *uintptr)
 }
 
 // symbol pairs an API field with its exported native name.
@@ -294,6 +324,8 @@ func (a *API) symbols() []symbol {
 		{&a.CreateConfig, "duckdb_create_config"},
 		{&a.SetConfig, "duckdb_set_config"},
 		{&a.DestroyConfig, "duckdb_destroy_config"},
+		{&a.ConfigCount, "duckdb_config_count"},
+		{&a.GetConfigFlag, "duckdb_get_config_flag"},
 		{&a.OpenExt, "duckdb_open_ext"},
 		{&a.CreateInstanceCache, "duckdb_create_instance_cache"},
 		{&a.GetOrCreateFromCache, "duckdb_get_or_create_from_cache"},
@@ -320,12 +352,21 @@ func (a *API) symbols() []symbol {
 		{&a.ExtractStatementsError, "duckdb_extract_statements_error"},
 		{&a.DestroyExtracted, "duckdb_destroy_extracted"},
 		{&a.NParams, "duckdb_nparams"},
+		{&a.ParamLogicalType, "duckdb_param_logical_type"},
+		{&a.PreparedStatementType, "duckdb_prepared_statement_type"},
 		{&a.ParameterName, "duckdb_parameter_name"},
 		{&a.BindParameterIndex, "duckdb_bind_parameter_index"},
 		{&a.ClearBindings, "duckdb_clear_bindings"},
 		{&a.PreparedStatementColumnCount, "duckdb_prepared_statement_column_count"},
 		{&a.PreparedStatementColumnName, "duckdb_prepared_statement_column_name"},
 		{&a.PreparedStatementColumnLogicalType, "duckdb_prepared_statement_column_logical_type"},
+		{&a.TableDescriptionCreateExt, "duckdb_table_description_create_ext"},
+		{&a.TableDescriptionDestroy, "duckdb_table_description_destroy"},
+		{&a.TableDescriptionError, "duckdb_table_description_error"},
+		{&a.TableDescriptionGetColumnCount, "duckdb_table_description_get_column_count"},
+		{&a.TableDescriptionGetColumnName, "duckdb_table_description_get_column_name"},
+		{&a.TableDescriptionGetColumnType, "duckdb_table_description_get_column_type"},
+		{&a.ColumnHasDefault, "duckdb_column_has_default"},
 		{&a.BindNull, "duckdb_bind_null"},
 		{&a.BindBoolean, "duckdb_bind_boolean"},
 		{&a.BindInt8, "duckdb_bind_int8"},
@@ -489,5 +530,7 @@ func (a *API) symbols() []symbol {
 		{&a.SchemaFromArrow, "duckdb_schema_from_arrow"},
 		{&a.DataChunkFromArrow, "duckdb_data_chunk_from_arrow"},
 		{&a.DestroyArrowConvertedSchema, "duckdb_destroy_arrow_converted_schema"},
+		{&a.ArrowArrayScan, "duckdb_arrow_array_scan"},
+		{&a.DestroyArrowStream, "duckdb_destroy_arrow_stream"},
 	}
 }

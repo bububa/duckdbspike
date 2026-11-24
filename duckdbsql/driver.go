@@ -17,12 +17,16 @@ import (
 )
 
 type connectorConfig struct {
-	cache    *duckdb.InstanceCache
-	budget   *duckdb.BudgetController
-	budgetCf duckdb.InstanceConfig
-	options  []duckdb.Option
-	connInit func(ctx context.Context, conn *duckdb.Conn) error
-	scanTime bool
+	cache           *duckdb.InstanceCache
+	budget          *duckdb.BudgetController
+	budgetCf        duckdb.InstanceConfig
+	options         []duckdb.Option
+	connInit        func(ctx context.Context, conn *duckdb.Conn) error
+	scanTime        bool
+	hasDecodeLimits bool
+	decodeLimits    duckdb.DecodeLimits
+	hasResultLimits bool
+	resultLimits    duckdb.ResultLimits
 }
 
 // ConnectorOption customizes a duckdbsql Connector or registered driver.
@@ -61,6 +65,24 @@ func WithConnInit(fn func(ctx context.Context, conn *duckdb.Conn) error) Connect
 // temporal structs (duckdb.Date, duckdb.Timestamp) are returned.
 func WithTimeScan(enabled bool) ConnectorOption {
 	return func(c *connectorConfig) { c.scanTime = enabled }
+}
+
+// WithDecodeLimits applies per-value decoding limits (depth, string/blob bytes,
+// collection elements) to every connection opened by the Connector.
+func WithDecodeLimits(limits duckdb.DecodeLimits) ConnectorOption {
+	return func(c *connectorConfig) {
+		c.hasDecodeLimits = true
+		c.decodeLimits = limits
+	}
+}
+
+// WithResultLimits applies per-query row and decoded-byte limits to every
+// connection opened by the Connector.
+func WithResultLimits(limits duckdb.ResultLimits) ConnectorOption {
+	return func(c *connectorConfig) {
+		c.hasResultLimits = true
+		c.resultLimits = limits
+	}
 }
 
 // ParseDSN parses a DuckDB DSN of the form "[path][?opt1=val1&opt2=val2]".
@@ -103,17 +125,40 @@ func ParseDSN(dsn string) (string, []duckdb.Option, error) {
 }
 
 // Connector implements database/sql/driver.Connector and io.Closer, owning one
-// *duckdb.Database shared across connections opened by sql.OpenDB.
+// *duckdb.Database (or borrowing a caller-owned *duckdb.ReadOnlySession) shared
+// across connections opened by sql.OpenDB.
 type Connector struct {
-	lib    *duckdb.Library
-	db     *duckdb.Database
-	cfg    connectorConfig
-	once   sync.Once
-	closed bool
-	mu     sync.Mutex
+	lib     *duckdb.Library
+	db      *duckdb.Database
+	session *duckdb.ReadOnlySession
+	cfg     connectorConfig
+	once    sync.Once
+	closed  bool
+	mu      sync.Mutex
 }
 
 var _ driver.Connector = (*Connector)(nil)
+
+// NewReadOnlyConnector wraps an existing sealed *duckdb.ReadOnlySession as a
+// driver.Connector suitable for sql.OpenDB. Ownership of session remains with
+// the caller: Connector.Close stops opening new connections but does NOT close
+// session. Options that apply only when opening a new database (WithInstanceCache,
+// WithBudget, WithOptions) are ignored.
+func NewReadOnlyConnector(session *duckdb.ReadOnlySession, opts ...ConnectorOption) (*Connector, error) {
+	if session == nil {
+		return nil, duckdb.ErrClosed
+	}
+	var cfg connectorConfig
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
+	return &Connector{
+		session: session,
+		cfg:     cfg,
+	}, nil
+}
 
 // NewConnector opens a DuckDB Database according to dsn and opts and returns a
 // driver.Connector suitable for sql.OpenDB. Call Close when finished (or close
@@ -174,9 +219,29 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 	if closed {
 		return nil, duckdb.ErrClosed
 	}
-	conn, err := c.db.Connect(ctx)
+	var (
+		conn *duckdb.Conn
+		err  error
+	)
+	if c.session != nil {
+		conn, err = c.session.Connect(ctx)
+	} else {
+		conn, err = c.db.Connect(ctx)
+	}
 	if err != nil {
 		return nil, err
+	}
+	if c.cfg.hasDecodeLimits {
+		if err := conn.SetDecodeLimits(c.cfg.decodeLimits); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+	if c.cfg.hasResultLimits {
+		if err := conn.SetResultLimits(c.cfg.resultLimits); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
 	}
 	if c.cfg.connInit != nil {
 		if err := c.cfg.connInit(ctx, conn); err != nil {

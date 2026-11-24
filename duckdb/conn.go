@@ -29,6 +29,7 @@ type Conn struct {
 	limits         DecodeLimits
 	resultLimits   ResultLimits
 	stmts          map[*Stmt]struct{}
+	arrowViews     map[*ArrowView]struct{}
 	active         *Rows
 	activeArrow    *ArrowRows
 	activeAppender *Appender
@@ -332,6 +333,9 @@ func (c *Conn) Close() error {
 		}
 		for s := range c.stmts {
 			s.releaseLocked()
+		}
+		for v := range c.arrowViews {
+			v.releaseLocked()
 		}
 		// Join any concurrent QueryProgress calls before disconnecting.
 		c.obsWG.Wait()

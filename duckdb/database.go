@@ -151,6 +151,7 @@ func (d *Database) Connect(ctx context.Context) (*Conn, error) {
 		api:               api,
 		handle:            handle,
 		stmts:             make(map[*Stmt]struct{}),
+		arrowViews:        make(map[*ArrowView]struct{}),
 		limits:            d.defaultDecode,
 		resultLimits:      d.defaultResult,
 		interruptInterval: defaultInterruptInterval,

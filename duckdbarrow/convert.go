@@ -7,6 +7,7 @@
 package duckdbarrow
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
@@ -48,7 +49,51 @@ func ImportSchema(s *duckdb.ArrowSchema) (*arrow.Schema, error) {
 		}
 		fields[i] = f
 	}
-	return arrow.NewSchema(fields, nil), nil
+	var schemaMeta *arrow.Metadata
+	if md, ok := decodeArrowMetadata(root.MetadataBytes()); ok {
+		schemaMeta = &md
+	}
+	return arrow.NewSchema(fields, schemaMeta), nil
+}
+
+func decodeArrowMetadata(raw []byte) (arrow.Metadata, bool) {
+	if len(raw) < 4 {
+		return arrow.Metadata{}, false
+	}
+	count := int(int32(binary.NativeEndian.Uint32(raw[:4])))
+	if count <= 0 {
+		return arrow.Metadata{}, false
+	}
+	off := 4
+	keys := make([]string, 0, count)
+	vals := make([]string, 0, count)
+	for i := 0; i < count; i++ {
+		if off+4 > len(raw) {
+			return arrow.Metadata{}, false
+		}
+		klen := int(int32(binary.NativeEndian.Uint32(raw[off : off+4])))
+		off += 4
+		if klen < 0 || off+klen > len(raw) {
+			return arrow.Metadata{}, false
+		}
+		k := string(raw[off : off+klen])
+		off += klen
+
+		if off+4 > len(raw) {
+			return arrow.Metadata{}, false
+		}
+		vlen := int(int32(binary.NativeEndian.Uint32(raw[off : off+4])))
+		off += 4
+		if vlen < 0 || off+vlen > len(raw) {
+			return arrow.Metadata{}, false
+		}
+		v := string(raw[off : off+vlen])
+		off += vlen
+
+		keys = append(keys, k)
+		vals = append(vals, v)
+	}
+	return arrow.NewMetadata(keys, vals), true
 }
 
 func importField(v duckdb.ArrowSchemaView, depth int) (arrow.Field, error) {
@@ -62,11 +107,15 @@ func importField(v duckdb.ArrowSchemaView, depth int) (arrow.Field, error) {
 	if err != nil {
 		return arrow.Field{}, err
 	}
-	return arrow.Field{
+	f := arrow.Field{
 		Name:     v.Name(),
 		Type:     dt,
 		Nullable: v.Flags()&arrowFlagNullable != 0,
-	}, nil
+	}
+	if md, ok := decodeArrowMetadata(v.MetadataBytes()); ok {
+		f.Metadata = md
+	}
+	return f, nil
 }
 
 func importDataType(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, error) {

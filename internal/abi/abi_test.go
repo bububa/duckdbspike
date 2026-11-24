@@ -370,3 +370,65 @@ func TestNativeLoad(t *testing.T) {
 		}
 	}
 }
+
+func TestSingletonArrowReleaseCallbacks(t *testing.T) {
+	before := ExportedArrowHandleCount()
+
+	// Verify singleton callback pointers are reused across many registrations.
+	schemaCB := ArrowSchemaReleaseCallback()
+	arrayCB := ArrowArrayReleaseCallback()
+	if schemaCB == 0 || arrayCB == 0 {
+		t.Fatalf("expected non-zero singleton callbacks: schema=%x array=%x", schemaCB, arrayCB)
+	}
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+
+	schemaCleanups := 0
+	s := &ArrowSchema{}
+	pinner.Pin(s)
+	RegisterExportedArrowSchema(s, func() { schemaCleanups++ })
+	if s.Release != schemaCB {
+		t.Fatalf("schema release = %x, want singleton %x", s.Release, schemaCB)
+	}
+	if got := ExportedArrowHandleCount(); got != before+1 {
+		t.Fatalf("handle count = %d, want %d", got, before+1)
+	}
+	ReleaseArrowSchema(s)
+	ReleaseArrowSchema(s) // idempotent
+	if schemaCleanups != 1 || s.Release != 0 {
+		t.Fatalf("schema cleanup count=%d release=%x, want 1 and 0", schemaCleanups, s.Release)
+	}
+
+	// Verify shallow-copy move semantics (as performed by duckdb_data_chunk_from_arrow).
+	arrayCleanups := 0
+	src := &ArrowArray{}
+	RegisterExportedArrowArray(src, func() { arrayCleanups++ })
+	moved := *src
+	src.Release = 0
+	pinner.Pin(&moved)
+	if moved.Release != arrayCB {
+		t.Fatalf("array release = %x, want singleton %x", moved.Release, arrayCB)
+	}
+	ReleaseArrowArray(&moved)
+	ReleaseArrowArray(&moved)
+	if arrayCleanups != 1 || moved.Release != 0 {
+		t.Fatalf("array cleanup count=%d release=%x, want 1 and 0", arrayCleanups, moved.Release)
+	}
+
+	// Child no-op release should clear Release without panicking or touching counts.
+	childS := &ArrowSchema{}
+	childA := &ArrowArray{}
+	pinner.Pin(childS)
+	pinner.Pin(childA)
+	MarkArrowSchemaChildRelease(childS)
+	MarkArrowArrayChildRelease(childA)
+	ReleaseArrowSchema(childS)
+	ReleaseArrowArray(childA)
+	if childS.Release != 0 || childA.Release != 0 {
+		t.Fatalf("child release not cleared")
+	}
+	if got := ExportedArrowHandleCount(); got != before {
+		t.Fatalf("leaked exported arrow handles: got %d, want %d", got, before)
+	}
+}
