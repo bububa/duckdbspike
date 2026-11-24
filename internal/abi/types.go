@@ -93,6 +93,37 @@ type QueryProgress struct {
 	TotalRowsToProcess uint64
 }
 
+// ArrowSchema mirrors struct ArrowSchema from the Apache Arrow C Data Interface.
+// It contains no Go pointers; Release is a C function pointer invoked via
+// ReleaseArrowSchema.
+type ArrowSchema struct {
+	Format      uintptr
+	Name        uintptr
+	Metadata    uintptr
+	Flags       int64
+	NChildren   int64
+	Children    uintptr
+	Dictionary  uintptr
+	Release     uintptr
+	PrivateData uintptr
+}
+
+// ArrowArray mirrors struct ArrowArray from the Apache Arrow C Data Interface.
+// It contains no Go pointers; Release is a C function pointer invoked via
+// ReleaseArrowArray.
+type ArrowArray struct {
+	Length      int64
+	NullCount   int64
+	Offset      int64
+	NBuffers    int64
+	NChildren   int64
+	Buffers     uintptr
+	Children    uintptr
+	Dictionary  uintptr
+	Release     uintptr
+	PrivateData uintptr
+}
+
 // Timestamp mirrors struct duckdb_timestamp (microseconds since 1970-01-01).
 type Timestamp struct {
 	Micros int64

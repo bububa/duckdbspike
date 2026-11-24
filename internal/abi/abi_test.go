@@ -224,8 +224,32 @@ func TestNativeABILayoutMatchesHeader(t *testing.T) {
 		t.Skipf("C compiler not found: %v", err)
 	}
 	probeSrc := `#include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include "duckdb.h"
+struct ArrowSchema {
+	const char *format;
+	const char *name;
+	const char *metadata;
+	int64_t flags;
+	int64_t n_children;
+	struct ArrowSchema **children;
+	struct ArrowSchema *dictionary;
+	void (*release)(struct ArrowSchema *);
+	void *private_data;
+};
+struct ArrowArray {
+	int64_t length;
+	int64_t null_count;
+	int64_t offset;
+	int64_t n_buffers;
+	int64_t n_children;
+	const void **buffers;
+	struct ArrowArray **children;
+	struct ArrowArray *dictionary;
+	void (*release)(struct ArrowArray *);
+	void *private_data;
+};
 #define S(t) printf("size %s %zu %zu\n", #t, sizeof(t), _Alignof(t))
 #define O(t, f) printf("off %s.%s %zu\n", #t, #f, offsetof(t, f))
 int main(void) {
@@ -253,6 +277,12 @@ int main(void) {
 	O(duckdb_query_progress_type, percentage);
 	O(duckdb_query_progress_type, rows_processed);
 	O(duckdb_query_progress_type, total_rows_to_process);
+	S(struct ArrowSchema);
+	O(struct ArrowSchema, release);
+	O(struct ArrowSchema, private_data);
+	S(struct ArrowArray);
+	O(struct ArrowArray, release);
+	O(struct ArrowArray, private_data);
 	return 0;
 }
 `
@@ -298,6 +328,12 @@ int main(void) {
 		fmt.Sprintf("off duckdb_query_progress_type.percentage %d", unsafe.Offsetof(QueryProgress{}.Percentage)),
 		fmt.Sprintf("off duckdb_query_progress_type.rows_processed %d", unsafe.Offsetof(QueryProgress{}.RowsProcessed)),
 		fmt.Sprintf("off duckdb_query_progress_type.total_rows_to_process %d", unsafe.Offsetof(QueryProgress{}.TotalRowsToProcess)),
+		fmt.Sprintf("size struct ArrowSchema %d %d", unsafe.Sizeof(ArrowSchema{}), unsafe.Alignof(ArrowSchema{})),
+		fmt.Sprintf("off struct ArrowSchema.release %d", unsafe.Offsetof(ArrowSchema{}.Release)),
+		fmt.Sprintf("off struct ArrowSchema.private_data %d", unsafe.Offsetof(ArrowSchema{}.PrivateData)),
+		fmt.Sprintf("size struct ArrowArray %d %d", unsafe.Sizeof(ArrowArray{}), unsafe.Alignof(ArrowArray{})),
+		fmt.Sprintf("off struct ArrowArray.release %d", unsafe.Offsetof(ArrowArray{}.Release)),
+		fmt.Sprintf("off struct ArrowArray.private_data %d", unsafe.Offsetof(ArrowArray{}.PrivateData)),
 	}, "\n") + "\n"
 	if got != want {
 		t.Fatalf("ABI layout mismatch:\ngot C:\n%s\nwant Go:\n%s", got, want)

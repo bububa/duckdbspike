@@ -30,6 +30,7 @@ type Conn struct {
 	resultLimits   ResultLimits
 	stmts          map[*Stmt]struct{}
 	active         *Rows
+	activeArrow    *ArrowRows
 	activeAppender *Appender
 	tx             *Tx
 
@@ -269,7 +270,7 @@ func (c *Conn) usableLocked() error {
 	if c.closed {
 		return ErrClosed
 	}
-	if c.active != nil || c.activeAppender != nil {
+	if c.active != nil || c.activeArrow != nil || c.activeAppender != nil {
 		return ErrBusy
 	}
 	return nil
@@ -318,6 +319,9 @@ func (c *Conn) Close() error {
 		c.closed = true
 		if c.active != nil {
 			c.active.releaseLocked()
+		}
+		if c.activeArrow != nil {
+			c.activeArrow.releaseLocked()
 		}
 		if c.activeAppender != nil {
 			_ = c.activeAppender.releaseLocked()

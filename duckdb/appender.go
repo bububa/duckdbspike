@@ -289,6 +289,51 @@ func (a *Appender) appendOneLocked(colIdx int, v Value) error {
 	return nil
 }
 
+// AppendArrowChunk ingests an Arrow C Data Interface chunk directly into the
+// appender via duckdb_schema_from_arrow, duckdb_data_chunk_from_arrow, and
+// duckdb_append_data_chunk. On success, ownership of array's native buffers
+// transfers to DuckDB and array is marked released; schema remains owned by
+// the caller to Release.
+func (a *Appender) AppendArrowChunk(schema *ArrowSchema, array *ArrowArray) error {
+	if a == nil {
+		return ErrClosed
+	}
+	if schema == nil || schema.Released() || array == nil || array.Released() {
+		return fmt.Errorf("%w: nil or already-released Arrow schema/array", ErrInvalidInput)
+	}
+	c := a.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if a.closed || c.closed {
+		return ErrClosed
+	}
+	api := c.api
+	var converted uintptr
+	if err := consumeErrorData(api, "schema_from_arrow", api.SchemaFromArrow(c.handle, schema.raw, &converted)); err != nil {
+		if converted != 0 {
+			api.DestroyArrowConvertedSchema(&converted)
+		}
+		return err
+	}
+	defer api.DestroyArrowConvertedSchema(&converted)
+
+	var chunk uintptr
+	if err := consumeErrorData(api, "data_chunk_from_arrow", api.DataChunkFromArrow(c.handle, array.raw, converted, &chunk)); err != nil {
+		if chunk != 0 {
+			api.DestroyDataChunk(&chunk)
+		}
+		return err
+	}
+	// Ownership of array's native data has transferred to DuckDB's DataChunk.
+	array.markTransferred()
+	defer api.DestroyDataChunk(&chunk)
+
+	if api.AppendDataChunk(a.handle, chunk) != abi.StateSuccess {
+		return a.errorLocked("append_data_chunk")
+	}
+	return nil
+}
+
 // Flush flushes buffered rows to the target table.
 func (a *Appender) Flush() error {
 	if a == nil {

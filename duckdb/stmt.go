@@ -12,11 +12,12 @@ import (
 // Stmt owns one native prepared statement. A Stmt stays alive while a Rows
 // started from it is open, because the streaming result borrows it.
 type Stmt struct {
-	_      noCopy
-	conn   *Conn
-	handle uintptr
-	closed bool
-	rows   *Rows
+	_         noCopy
+	conn      *Conn
+	handle    uintptr
+	closed    bool
+	rows      *Rows
+	arrowRows *ArrowRows
 }
 
 // ParamCount returns the number of parameters declared by the statement.
@@ -343,7 +344,7 @@ func (s *Stmt) Close() error {
 	if s.closed {
 		return nil
 	}
-	if s.rows != nil {
+	if s.rows != nil || s.arrowRows != nil {
 		return ErrBusy
 	}
 	s.releaseLocked()
@@ -356,6 +357,9 @@ func (s *Stmt) releaseLocked() {
 	}
 	if s.rows != nil {
 		s.rows.releaseLocked()
+	}
+	if s.arrowRows != nil {
+		s.arrowRows.releaseLocked()
 	}
 	s.closed = true
 	s.conn.api.DestroyPrepare(&s.handle)

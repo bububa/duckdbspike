@@ -189,3 +189,25 @@ func CString(s string) ([]byte, error) {
 	copy(b, s)
 	return b, nil
 }
+
+// ReleaseArrowSchema invokes the C release callback of an ArrowSchema and
+// clears its Release pointer. Safe to call on nil or already-released schemas.
+func ReleaseArrowSchema(s *ArrowSchema) {
+	if s == nil || s.Release == 0 {
+		return
+	}
+	fn := s.Release
+	purego.SyscallN(fn, uintptr(unsafe.Pointer(s)))
+	s.Release = 0
+}
+
+// ReleaseArrowArray invokes the C release callback of an ArrowArray and clears
+// its Release pointer. Safe to call on nil or already-released arrays.
+func ReleaseArrowArray(a *ArrowArray) {
+	if a == nil || a.Release == 0 {
+		return
+	}
+	fn := a.Release
+	purego.SyscallN(fn, uintptr(unsafe.Pointer(a)))
+	a.Release = 0
+}

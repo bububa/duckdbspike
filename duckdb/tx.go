@@ -179,3 +179,20 @@ func (tx *Tx) NewAppender(ctx context.Context, catalog, schema, table string) (*
 	}
 	return tx.conn.newAppenderWithTx(ctx, tx, catalog, schema, table)
 }
+
+// QueryArrow starts a streaming Arrow C Data Interface query within tx.
+func (tx *Tx) QueryArrow(ctx context.Context, sql string, args ...Value) (*ArrowRows, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	return tx.conn.queryArrowWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+}
+
+// QueryArrowNamed starts a streaming Arrow C Data Interface query with named
+// parameters within tx.
+func (tx *Tx) QueryArrowNamed(ctx context.Context, sql string, args ...NamedArg) (*ArrowRows, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	return tx.conn.queryArrowWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+}

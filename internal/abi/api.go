@@ -252,6 +252,22 @@ type API struct {
 	AppendBlob           func(appender uintptr, data *byte, length uint64) int32
 	AppendValue          func(appender uintptr, value uintptr) int32
 	AppendDataChunk      func(appender uintptr, chunk uintptr) int32
+
+	// Arrow C Data Interface (v1.5.6 stable).
+	// ConnectionGetArrowOptions allocates owned options released by
+	// DestroyArrowOptions. ToArrowSchema / DataChunkToArrow / SchemaFromArrow /
+	// DataChunkFromArrow return an owned duckdb_error_data released by
+	// DestroyErrorData. outSchema / outArray are owned and released via their
+	// C release callback (ReleaseArrowSchema / ReleaseArrowArray).
+	// DataChunkFromArrow transfers array ownership to the returned DataChunk on
+	// success.
+	ConnectionGetArrowOptions   func(connection uintptr, out *uintptr)
+	DestroyArrowOptions         func(options *uintptr)
+	ToArrowSchema               func(options uintptr, types *uintptr, names *uintptr, colCount uint64, outSchema *ArrowSchema) uintptr
+	DataChunkToArrow            func(options uintptr, chunk uintptr, outArray *ArrowArray) uintptr
+	SchemaFromArrow             func(connection uintptr, schema *ArrowSchema, outConverted *uintptr) uintptr
+	DataChunkFromArrow          func(connection uintptr, array *ArrowArray, converted uintptr, outChunk *uintptr) uintptr
+	DestroyArrowConvertedSchema func(converted *uintptr)
 }
 
 // symbol pairs an API field with its exported native name.
@@ -445,5 +461,12 @@ func (a *API) symbols() []symbol {
 		{&a.AppendBlob, "duckdb_append_blob"},
 		{&a.AppendValue, "duckdb_append_value"},
 		{&a.AppendDataChunk, "duckdb_append_data_chunk"},
+		{&a.ConnectionGetArrowOptions, "duckdb_connection_get_arrow_options"},
+		{&a.DestroyArrowOptions, "duckdb_destroy_arrow_options"},
+		{&a.ToArrowSchema, "duckdb_to_arrow_schema"},
+		{&a.DataChunkToArrow, "duckdb_data_chunk_to_arrow"},
+		{&a.SchemaFromArrow, "duckdb_schema_from_arrow"},
+		{&a.DataChunkFromArrow, "duckdb_data_chunk_from_arrow"},
+		{&a.DestroyArrowConvertedSchema, "duckdb_destroy_arrow_converted_schema"},
 	}
 }
