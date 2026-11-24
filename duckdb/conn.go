@@ -34,6 +34,7 @@ type Conn struct {
 	cancelMu          sync.Mutex
 	closing           bool
 	activeScope       *cancelScope
+	obsWG             sync.WaitGroup
 	interruptInterval time.Duration
 	closeOnce         sync.Once
 }
@@ -155,6 +156,16 @@ func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
 // (such as SET, CREATE VIEW, or CHECKPOINT). RowsAffected is copied before the
 // native result and statement are destroyed.
 func (c *Conn) Exec(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
+	return c.execWithBinder(ctx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+}
+
+// ExecNamed prepares sql, binds named parameters ($name), and runs a statement
+// that does not stream rows.
+func (c *Conn) ExecNamed(ctx context.Context, sql string, args ...NamedArg) (ExecResult, error) {
+	return c.execWithBinder(ctx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+}
+
+func (c *Conn) execWithBinder(ctx context.Context, sql string, bind func(*Stmt) error) (ExecResult, error) {
 	if c == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -179,13 +190,23 @@ func (c *Conn) Exec(ctx context.Context, sql string, args ...Value) (ExecResult,
 		return ExecResult{}, err
 	}
 	defer s.releaseLocked()
-	return s.execLocked(args, scope)
+	return s.execLocked(func() error { return bind(s) }, scope)
 }
 
 // Query prepares sql, binds args, and starts a streaming result. The returned
 // Rows owns both the statement and the cancellation scope, joining and
 // releasing them on Close.
 func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, error) {
+	return c.queryWithBinder(ctx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+}
+
+// QueryNamed prepares sql, binds named parameters ($name), and starts a
+// streaming result.
+func (c *Conn) QueryNamed(ctx context.Context, sql string, args ...NamedArg) (*Rows, error) {
+	return c.queryWithBinder(ctx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+}
+
+func (c *Conn) queryWithBinder(ctx context.Context, sql string, bind func(*Stmt) error) (*Rows, error) {
 	if c == nil {
 		return nil, ErrClosed
 	}
@@ -209,7 +230,7 @@ func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, err
 		c.endScopeLocked(scope)
 		return nil, err
 	}
-	rows, err := s.startLocked(args, scope)
+	rows, err := s.startLocked(func() error { return bind(s) }, scope)
 	if err != nil {
 		s.releaseLocked()
 		c.endScopeLocked(scope)
@@ -276,6 +297,8 @@ func (c *Conn) Close() error {
 		for s := range c.stmts {
 			s.releaseLocked()
 		}
+		// Join any concurrent QueryProgress calls before disconnecting.
+		c.obsWG.Wait()
 		c.api.Disconnect(&c.handle)
 		c.mu.Unlock()
 		c.db.forget(c)

@@ -244,10 +244,15 @@ int main(void) {
 	S(duckdb_date);
 	S(duckdb_time);
 	S(duckdb_time_ns);
+	S(duckdb_time_tz);
 	S(duckdb_timestamp);
 	S(duckdb_timestamp_s);
 	S(duckdb_timestamp_ms);
 	S(duckdb_timestamp_ns);
+	S(duckdb_query_progress_type);
+	O(duckdb_query_progress_type, percentage);
+	O(duckdb_query_progress_type, rows_processed);
+	O(duckdb_query_progress_type, total_rows_to_process);
 	return 0;
 }
 `
@@ -284,10 +289,15 @@ int main(void) {
 		fmt.Sprintf("size duckdb_date %d %d", unsafe.Sizeof(Date{}), unsafe.Alignof(Date{})),
 		fmt.Sprintf("size duckdb_time %d %d", unsafe.Sizeof(Time{}), unsafe.Alignof(Time{})),
 		fmt.Sprintf("size duckdb_time_ns %d %d", unsafe.Sizeof(TimeNS{}), unsafe.Alignof(TimeNS{})),
+		fmt.Sprintf("size duckdb_time_tz %d %d", unsafe.Sizeof(TimeTZ{}), unsafe.Alignof(TimeTZ{})),
 		fmt.Sprintf("size duckdb_timestamp %d %d", unsafe.Sizeof(Timestamp{}), unsafe.Alignof(Timestamp{})),
 		fmt.Sprintf("size duckdb_timestamp_s %d %d", unsafe.Sizeof(TimestampS{}), unsafe.Alignof(TimestampS{})),
 		fmt.Sprintf("size duckdb_timestamp_ms %d %d", unsafe.Sizeof(TimestampMS{}), unsafe.Alignof(TimestampMS{})),
 		fmt.Sprintf("size duckdb_timestamp_ns %d %d", unsafe.Sizeof(TimestampNS{}), unsafe.Alignof(TimestampNS{})),
+		fmt.Sprintf("size duckdb_query_progress_type %d %d", unsafe.Sizeof(QueryProgress{}), unsafe.Alignof(QueryProgress{})),
+		fmt.Sprintf("off duckdb_query_progress_type.percentage %d", unsafe.Offsetof(QueryProgress{}.Percentage)),
+		fmt.Sprintf("off duckdb_query_progress_type.rows_processed %d", unsafe.Offsetof(QueryProgress{}.RowsProcessed)),
+		fmt.Sprintf("off duckdb_query_progress_type.total_rows_to_process %d", unsafe.Offsetof(QueryProgress{}.TotalRowsToProcess)),
 	}, "\n") + "\n"
 	if got != want {
 		t.Fatalf("ABI layout mismatch:\ngot C:\n%s\nwant Go:\n%s", got, want)

@@ -338,16 +338,14 @@ func TestNativeUnsupportedTypesRejectedEvenAllNullOrEmpty(t *testing.T) {
 	defer conn.Close()
 
 	queries := []string{
-		"SELECT NULL::UUID AS u",
 		"SELECT NULL::UNION(a INTEGER, b VARCHAR) AS u",
 		"SELECT NULL::BIGNUM AS bn",
 		"SELECT NULL::VARIANT AS v",
 		"SELECT NULL::BIT AS b",
-		"SELECT NULL::TIME WITH TIME ZONE AS t",
-		"SELECT [NULL::UUID] AS nested_list",
-		"SELECT {'x': NULL::UUID} AS nested_struct",
-		"SELECT MAP {'k': NULL::UUID} AS nested_map",
-		"SELECT NULL::UUID AS empty_res WHERE false",
+		"SELECT [NULL::UNION(a INTEGER, b VARCHAR)] AS nested_list",
+		"SELECT {'x': NULL::BIGNUM} AS nested_struct",
+		"SELECT MAP {'k': NULL::BIT} AS nested_map",
+		"SELECT NULL::BIGNUM AS empty_res WHERE false",
 	}
 	for _, q := range queries {
 		// Stmt.Columns() rejects at prepare time.

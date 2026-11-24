@@ -37,6 +37,35 @@ func (s *Stmt) ParamCount() (int, error) {
 	return int(n), nil
 }
 
+// ParamNames returns the parameter identifiers declared by the statement in
+// 1-based ordinal order (for example, "1", "2" for positional parameters or
+// "tenant", "cutoff" for named $tenant / $cutoff parameters).
+func (s *Stmt) ParamNames() ([]string, error) {
+	if s == nil {
+		return nil, ErrClosed
+	}
+	c := s.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s.closed || c.closed {
+		return nil, ErrClosed
+	}
+	api := c.api
+	n := api.NParams(s.handle)
+	if n > math.MaxInt {
+		return nil, fmt.Errorf("%w: parameter count %d overflows int", ErrInvalidInput, n)
+	}
+	names := make([]string, int(n))
+	for i := uint64(0); i < n; i++ {
+		ptr := api.ParameterName(s.handle, i+1)
+		names[i] = abi.GoString(ptr)
+		if ptr != 0 {
+			api.Free(ptr)
+		}
+	}
+	return names, nil
+}
+
 // Columns inspects the prepared statement's output schema before execution,
 // enabling callers and query templates to assert exact column names and types
 // (for example rejecting expressions that widen DECIMAL to DOUBLE). Any
@@ -77,6 +106,16 @@ func (s *Stmt) Columns() ([]Column, error) {
 // Exec binds args, runs the statement to completion under ctx cancellation,
 // copies RowsAffected, and destroys the native result before returning.
 func (s *Stmt) Exec(ctx context.Context, args ...Value) (ExecResult, error) {
+	return s.execWithBinder(ctx, func() error { return s.bindLocked(args) })
+}
+
+// ExecNamed binds named parameters ($name), runs the statement to completion
+// under ctx cancellation, copies RowsAffected, and destroys the native result.
+func (s *Stmt) ExecNamed(ctx context.Context, args ...NamedArg) (ExecResult, error) {
+	return s.execWithBinder(ctx, func() error { return s.bindNamedLocked(args) })
+}
+
+func (s *Stmt) execWithBinder(ctx context.Context, bind func() error) (ExecResult, error) {
 	if s == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -100,12 +139,22 @@ func (s *Stmt) Exec(ctx context.Context, args ...Value) (ExecResult, error) {
 		return ExecResult{}, err
 	}
 	defer c.endScopeLocked(scope)
-	return s.execLocked(args, scope)
+	return s.execLocked(bind, scope)
 }
 
 // Query binds args and starts a streaming result governed by ctx cancellation
 // through final fetch and decode. The Rows borrows the Stmt.
 func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
+	return s.queryWithBinder(ctx, func() error { return s.bindLocked(args) })
+}
+
+// QueryNamed binds named parameters ($name) and starts a streaming result
+// governed by ctx cancellation through final fetch and decode.
+func (s *Stmt) QueryNamed(ctx context.Context, args ...NamedArg) (*Rows, error) {
+	return s.queryWithBinder(ctx, func() error { return s.bindNamedLocked(args) })
+}
+
+func (s *Stmt) queryWithBinder(ctx context.Context, bind func() error) (*Rows, error) {
 	if s == nil {
 		return nil, ErrClosed
 	}
@@ -128,7 +177,7 @@ func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.startLocked(args, scope)
+	rows, err := s.startLocked(bind, scope)
 	if err != nil {
 		c.endScopeLocked(scope)
 		return nil, err
@@ -136,14 +185,14 @@ func (s *Stmt) Query(ctx context.Context, args ...Value) (*Rows, error) {
 	return rows, nil
 }
 
-// runPendingLocked binds args and runs pending(streaming) → tasks → execute
+// runPendingLocked binds parameters and runs pending(streaming) → tasks → execute
 // under scope. On failure or cancellation, pending and result are destroyed
 // before returning.
-func (s *Stmt) runPendingLocked(args []Value, scope *cancelScope) (abi.Result, error) {
+func (s *Stmt) runPendingLocked(bind func() error, scope *cancelScope) (abi.Result, error) {
 	if cerr := scope.err(); cerr != nil {
 		return abi.Result{}, cerr
 	}
-	if err := s.bindLocked(args); err != nil {
+	if err := bind(); err != nil {
 		return abi.Result{}, err
 	}
 	if cerr := scope.err(); cerr != nil {
@@ -200,8 +249,8 @@ tasks:
 	return result, nil
 }
 
-func (s *Stmt) execLocked(args []Value, scope *cancelScope) (ExecResult, error) {
-	result, err := s.runPendingLocked(args, scope)
+func (s *Stmt) execLocked(bind func() error, scope *cancelScope) (ExecResult, error) {
+	result, err := s.runPendingLocked(bind, scope)
 	if err != nil {
 		return ExecResult{}, err
 	}
@@ -217,8 +266,8 @@ func (s *Stmt) execLocked(args []Value, scope *cancelScope) (ExecResult, error) 
 // startLocked executes the statement, validates every column's logical type
 // tree (even if the result has 0 rows or all NULLs), and publishes a Rows only
 // after the native result is verified to be streaming and not canceled.
-func (s *Stmt) startLocked(args []Value, scope *cancelScope) (*Rows, error) {
-	result, err := s.runPendingLocked(args, scope)
+func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error) {
+	result, err := s.runPendingLocked(bind, scope)
 	if err != nil {
 		return nil, err
 	}

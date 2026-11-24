@@ -81,6 +81,18 @@ type TimeNS struct {
 	Nanos int64
 }
 
+// TimeTZ mirrors struct duckdb_time_tz (40 bits micros + 24 bits biased offset).
+type TimeTZ struct {
+	Bits uint64
+}
+
+// QueryProgress mirrors struct duckdb_query_progress_type.
+type QueryProgress struct {
+	Percentage         float64
+	RowsProcessed      uint64
+	TotalRowsToProcess uint64
+}
+
 // Timestamp mirrors struct duckdb_timestamp (microseconds since 1970-01-01).
 type Timestamp struct {
 	Micros int64

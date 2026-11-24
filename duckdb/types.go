@@ -1,9 +1,12 @@
 package duckdb
 
 import (
+	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"strings"
 )
 
@@ -32,12 +35,16 @@ const (
 	TypeDate
 	TypeTime
 	TypeTimeNS
+	TypeTimeTZ
 	TypeTimestamp
 	TypeTimestampS
 	TypeTimestampMS
 	TypeTimestampNS
 	TypeTimestampTZ
 	TypeInterval
+	TypeUUID
+	TypeEnum
+	TypeSQLNull
 	TypeList
 	TypeArray
 	TypeStruct
@@ -86,6 +93,8 @@ func (k TypeKind) String() string {
 		return "TIME"
 	case TypeTimeNS:
 		return "TIME_NS"
+	case TypeTimeTZ:
+		return "TIMETZ"
 	case TypeTimestamp:
 		return "TIMESTAMP"
 	case TypeTimestampS:
@@ -98,6 +107,12 @@ func (k TypeKind) String() string {
 		return "TIMESTAMPTZ"
 	case TypeInterval:
 		return "INTERVAL"
+	case TypeUUID:
+		return "UUID"
+	case TypeEnum:
+		return "ENUM"
+	case TypeSQLNull:
+		return "SQLNULL"
 	case TypeList:
 		return "LIST"
 	case TypeArray:
@@ -121,6 +136,7 @@ type StructFieldType struct {
 // All native handles are released before a LogicalType is returned.
 type LogicalType struct {
 	Kind         TypeKind
+	Alias        string
 	DecimalWidth uint8
 	DecimalScale uint8
 	ArraySize    uint64
@@ -128,11 +144,19 @@ type LogicalType struct {
 	Key          *LogicalType
 	Value        *LogicalType
 	Fields       []StructFieldType
+	EnumValues   []string
 }
+
+var jsonLogicalType = LogicalType{Kind: TypeVarchar, Alias: "JSON"}
 
 // ScalarType constructs a LogicalType for a non-parameterized scalar kind.
 func ScalarType(kind TypeKind) LogicalType {
 	return LogicalType{Kind: kind}
+}
+
+// JSONType constructs DuckDB's aliased JSON logical type (VARCHAR with alias "JSON").
+func JSONType() LogicalType {
+	return jsonLogicalType
 }
 
 // DecimalType constructs a DECIMAL(width, scale) LogicalType.
@@ -140,9 +164,81 @@ func DecimalType(width, scale uint8) LogicalType {
 	return LogicalType{Kind: TypeDecimal, DecimalWidth: width, DecimalScale: scale}
 }
 
+// EnumType constructs an ENUM LogicalType from its ordered dictionary labels.
+func EnumType(values ...string) LogicalType {
+	return LogicalType{Kind: TypeEnum, EnumValues: append([]string(nil), values...)}
+}
+
+// ListType constructs a LIST<elem> LogicalType.
+func ListType(elem LogicalType) LogicalType {
+	e := cloneLogicalType(elem)
+	return LogicalType{Kind: TypeList, Elem: e}
+}
+
+// ArrayType constructs a fixed-length ARRAY<elem, size> LogicalType.
+func ArrayType(elem LogicalType, size uint64) LogicalType {
+	e := cloneLogicalType(elem)
+	return LogicalType{Kind: TypeArray, ArraySize: size, Elem: e}
+}
+
+// MapType constructs a MAP<key, val> LogicalType.
+func MapType(key, val LogicalType) LogicalType {
+	return LogicalType{Kind: TypeMap, Key: cloneLogicalType(key), Value: cloneLogicalType(val)}
+}
+
+// StructType constructs a STRUCT LogicalType from positional field definitions.
+func StructType(fields ...StructFieldType) LogicalType {
+	cp := make([]StructFieldType, len(fields))
+	for i, f := range fields {
+		cp[i] = StructFieldType{Name: f.Name, Type: *cloneLogicalType(f.Type)}
+	}
+	return LogicalType{Kind: TypeStruct, Fields: cp}
+}
+
+// IsJSON reports whether t is DuckDB's JSON logical type (VARCHAR aliased as "JSON").
+func (t LogicalType) IsJSON() bool {
+	return t.Kind == TypeVarchar && t.Alias == "JSON"
+}
+
+func cloneLogicalType(t LogicalType) *LogicalType {
+	cp := t
+	if t.Elem != nil {
+		cp.Elem = cloneLogicalType(*t.Elem)
+	}
+	if t.Key != nil {
+		cp.Key = cloneLogicalType(*t.Key)
+	}
+	if t.Value != nil {
+		cp.Value = cloneLogicalType(*t.Value)
+	}
+	if len(t.Fields) > 0 {
+		cp.Fields = make([]StructFieldType, len(t.Fields))
+		for i, f := range t.Fields {
+			cp.Fields[i] = StructFieldType{Name: f.Name, Type: *cloneLogicalType(f.Type)}
+		}
+	}
+	if len(t.EnumValues) > 0 {
+		cp.EnumValues = append([]string(nil), t.EnumValues...)
+	}
+	return &cp
+}
+
+func (t LogicalType) needsHeapMeta() bool {
+	if t.Alias != "" {
+		return true
+	}
+	switch t.Kind {
+	case TypeEnum, TypeList, TypeArray, TypeStruct, TypeMap:
+		return true
+	default:
+		return false
+	}
+}
+
 // Equal reports exact structural equality of two LogicalType trees.
 func (t LogicalType) Equal(other LogicalType) bool {
 	if t.Kind != other.Kind ||
+		t.Alias != other.Alias ||
 		t.DecimalWidth != other.DecimalWidth ||
 		t.DecimalScale != other.DecimalScale ||
 		t.ArraySize != other.ArraySize {
@@ -161,6 +257,9 @@ func (t LogicalType) Equal(other LogicalType) bool {
 			return false
 		}
 	}
+	if !slices.Equal(t.EnumValues, other.EnumValues) {
+		return false
+	}
 	return true
 }
 
@@ -173,33 +272,46 @@ func equalLogicalTypePtr(a, b *LogicalType) bool {
 
 // String formats a diagnostic description of t.
 func (t LogicalType) String() string {
+	if t.IsJSON() {
+		return "JSON"
+	}
+	var base string
 	switch t.Kind {
 	case TypeDecimal:
-		return fmt.Sprintf("DECIMAL(%d,%d)", t.DecimalWidth, t.DecimalScale)
+		base = fmt.Sprintf("DECIMAL(%d,%d)", t.DecimalWidth, t.DecimalScale)
+	case TypeEnum:
+		base = fmt.Sprintf("ENUM(%d)", len(t.EnumValues))
 	case TypeList:
 		if t.Elem != nil {
-			return fmt.Sprintf("LIST<%s>", t.Elem.String())
+			base = fmt.Sprintf("LIST<%s>", t.Elem.String())
+		} else {
+			base = "LIST"
 		}
-		return "LIST"
 	case TypeArray:
 		if t.Elem != nil {
-			return fmt.Sprintf("ARRAY<%s,%d>", t.Elem.String(), t.ArraySize)
+			base = fmt.Sprintf("ARRAY<%s,%d>", t.Elem.String(), t.ArraySize)
+		} else {
+			base = "ARRAY"
 		}
-		return "ARRAY"
 	case TypeMap:
 		if t.Key != nil && t.Value != nil {
-			return fmt.Sprintf("MAP<%s,%s>", t.Key.String(), t.Value.String())
+			base = fmt.Sprintf("MAP<%s,%s>", t.Key.String(), t.Value.String())
+		} else {
+			base = "MAP"
 		}
-		return "MAP"
 	case TypeStruct:
 		parts := make([]string, len(t.Fields))
 		for i, f := range t.Fields {
 			parts[i] = f.Name + ":" + f.Type.String()
 		}
-		return "STRUCT{" + strings.Join(parts, ",") + "}"
+		base = "STRUCT{" + strings.Join(parts, ",") + "}"
 	default:
-		return t.Kind.String()
+		base = t.Kind.String()
 	}
+	if t.Alias != "" {
+		return fmt.Sprintf("%s(%s)", t.Alias, base)
+	}
+	return base
 }
 
 // Hugeint is an immutable signed 128-bit integer in two's complement
@@ -318,6 +430,42 @@ func (u Uhugeint) String() string {
 	return u.BigInt().String()
 }
 
+// UUID is a 16-byte RFC 4122 UUID in standard big-endian byte order.
+type UUID [16]byte
+
+// String formats u as a canonical lowercase hyphenated UUID string.
+func (u UUID) String() string {
+	var buf [36]byte
+	hex.Encode(buf[0:8], u[0:4])
+	buf[8] = '-'
+	hex.Encode(buf[9:13], u[4:6])
+	buf[13] = '-'
+	hex.Encode(buf[14:18], u[6:8])
+	buf[18] = '-'
+	hex.Encode(buf[19:23], u[8:10])
+	buf[23] = '-'
+	hex.Encode(buf[24:36], u[10:16])
+	return string(buf[:])
+}
+
+// ParseUUID parses a canonical 36-character hyphenated UUID string (case-insensitive).
+func ParseUUID(s string) (UUID, error) {
+	var u UUID
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return UUID{}, fmt.Errorf("%w: invalid UUID %q", ErrInvalidInput, s)
+	}
+	var hexBytes [32]byte
+	copy(hexBytes[0:8], s[0:8])
+	copy(hexBytes[8:12], s[9:13])
+	copy(hexBytes[12:16], s[14:18])
+	copy(hexBytes[16:20], s[19:23])
+	copy(hexBytes[20:32], s[24:36])
+	if _, err := hex.Decode(u[:], hexBytes[:]); err != nil {
+		return UUID{}, fmt.Errorf("%w: invalid UUID %q: %v", ErrInvalidInput, s, err)
+	}
+	return u, nil
+}
+
 // Decimal is an exact base-10 fixed-point value: Value * 10^(-Scale).
 // Width is in [1, 38] and Scale is in [0, Width].
 type Decimal struct {
@@ -406,6 +554,36 @@ type TimeNS struct {
 	Nanos int64
 }
 
+const (
+	timeTZMaxMicros = 24 * 60 * 60 * 1_000_000 // 86_400_000_000 (DuckDB allows 24:00:00)
+	timeTZMaxOffset = 16*60*60 - 1             // ±15:59:59 (±57599s)
+)
+
+// TimeTZ preserves DuckDB's TIME WITH TIME ZONE value as microseconds since
+// 00:00:00 and a fixed UTC offset in seconds (east of UTC, in [-57599, +57599]).
+type TimeTZ struct {
+	Micros        int64
+	OffsetSeconds int32
+}
+
+// Validate checks that Micros and OffsetSeconds are within DuckDB's TIME_TZ bounds.
+func (t TimeTZ) Validate() error {
+	if t.Micros < 0 || t.Micros > timeTZMaxMicros {
+		return fmt.Errorf("%w: TIMETZ micros %d outside [0, %d]", ErrOutOfRange, t.Micros, timeTZMaxMicros)
+	}
+	if t.OffsetSeconds < -timeTZMaxOffset || t.OffsetSeconds > timeTZMaxOffset {
+		return fmt.Errorf("%w: TIMETZ offset %d outside [%d, %d]", ErrOutOfRange, t.OffsetSeconds, -timeTZMaxOffset, timeTZMaxOffset)
+	}
+	return nil
+}
+
+// Enum represents a SQL ENUM dictionary member with both its zero-based
+// dictionary index and its exact label.
+type Enum struct {
+	Index uint32
+	Label string
+}
+
 // TimestampUnit identifies the exact unit and timezone semantics of Timestamp.
 type TimestampUnit int
 
@@ -448,7 +626,7 @@ type ArrayValue struct {
 	Elements []Value
 }
 
-// StructFieldValue is one positional field of a decoded STRUCT.
+// StructFieldValue is one positional field of a decoded or bound SQL STRUCT.
 type StructFieldValue struct {
 	Name  string
 	Type  LogicalType
@@ -460,7 +638,7 @@ type StructValue struct {
 	Fields []StructFieldValue
 }
 
-// MapEntry is one key/value pair of a decoded SQL MAP.
+// MapEntry is one key/value pair of a decoded or bound SQL MAP.
 type MapEntry struct {
 	Key   Value
 	Value Value
@@ -476,68 +654,180 @@ type MapValue struct {
 // Value holds one SQL parameter or decoded column value with exact type and
 // explicit SQL NULL state. All composite/byte data inside a Value is owned by
 // Go and never aliases native chunk memory.
+//
+// Value uses a compact 48-byte tagged representation on 64-bit platforms:
+// fixed-width scalars (including 128-bit integers, Decimal, UUID, Interval,
+// and temporal types) are stored inline in lo/hi without heap allocation, and
+// complex/aliased metadata shares an immutable *LogicalType pointer.
 type Value struct {
-	typ  LogicalType
+	lo   uint64
+	hi   uint64
+	ref  any
+	lt   *LogicalType
+	kind uint8
 	null bool
-
-	b     bool
-	i64   int64
-	u64   uint64
-	f32   float32
-	f64   float64
-	huge  Hugeint
-	uhuge Uhugeint
-	dec   Decimal
-	str   string
-	blob  []byte
-	iv    Interval
-	ts    Timestamp
-	list  ListValue
-	arr   ArrayValue
-	st    StructValue
-	mp    MapValue
+	decW uint8
+	decS uint8
+	tsU  uint8
 }
 
 // IsNull reports whether v represents SQL NULL.
 func (v Value) IsNull() bool { return v.null }
 
 // Type returns v's LogicalType (TypeInvalid for untyped NullValue()).
-func (v Value) Type() LogicalType { return v.typ }
+func (v Value) Type() LogicalType {
+	if v.lt != nil {
+		return *v.lt
+	}
+	k := TypeKind(v.kind)
+	if k == TypeDecimal {
+		return DecimalType(v.decW, v.decS)
+	}
+	return ScalarType(k)
+}
 
 // Kind returns v.Type().Kind.
-func (v Value) Kind() TypeKind { return v.typ.Kind }
+func (v Value) Kind() TypeKind { return TypeKind(v.kind) }
+
+// IsJSON reports whether v has DuckDB's JSON logical type (VARCHAR with alias "JSON").
+func (v Value) IsJSON() bool {
+	return v.lt != nil && v.lt.IsJSON()
+}
 
 // NullValue constructs an untyped SQL NULL parameter value.
 func NullValue() Value { return Value{null: true} }
 
 // TypedNullValue constructs a SQL NULL carrying a column's LogicalType.
-func TypedNullValue(lt LogicalType) Value { return Value{typ: lt, null: true} }
+func TypedNullValue(lt LogicalType) Value {
+	v := Value{
+		kind: uint8(lt.Kind),
+		null: true,
+		decW: lt.DecimalWidth,
+		decS: lt.DecimalScale,
+	}
+	if lt.needsHeapMeta() {
+		v.lt = cloneLogicalType(lt)
+	}
+	return v
+}
 
-func BoolValue(v bool) Value         { return Value{typ: ScalarType(TypeBoolean), b: v} }
-func Int8Value(v int8) Value         { return Value{typ: ScalarType(TypeTinyint), i64: int64(v)} }
-func Int16Value(v int16) Value       { return Value{typ: ScalarType(TypeSmallint), i64: int64(v)} }
-func Int32Value(v int32) Value       { return Value{typ: ScalarType(TypeInteger), i64: int64(v)} }
-func Int64Value(v int64) Value       { return Value{typ: ScalarType(TypeBigint), i64: v} }
-func Uint8Value(v uint8) Value       { return Value{typ: ScalarType(TypeUTinyint), u64: uint64(v)} }
-func Uint16Value(v uint16) Value     { return Value{typ: ScalarType(TypeUSmallint), u64: uint64(v)} }
-func Uint32Value(v uint32) Value     { return Value{typ: ScalarType(TypeUInteger), u64: uint64(v)} }
-func Uint64Value(v uint64) Value     { return Value{typ: ScalarType(TypeUBigint), u64: v} }
-func HugeintValue(v Hugeint) Value   { return Value{typ: ScalarType(TypeHugeint), huge: v} }
-func UhugeintValue(v Uhugeint) Value { return Value{typ: ScalarType(TypeUhugeint), uhuge: v} }
-func Float32Value(v float32) Value   { return Value{typ: ScalarType(TypeFloat), f32: v} }
-func Float64Value(v float64) Value   { return Value{typ: ScalarType(TypeDouble), f64: v} }
-func VarcharValue(v string) Value    { return Value{typ: ScalarType(TypeVarchar), str: v} }
-func DateValue(v Date) Value         { return Value{typ: ScalarType(TypeDate), i64: int64(v.Days)} }
-func TimeValue(v Time) Value         { return Value{typ: ScalarType(TypeTime), i64: v.Micros} }
-func TimeNSValue(v TimeNS) Value     { return Value{typ: ScalarType(TypeTimeNS), i64: v.Nanos} }
-func IntervalValue(v Interval) Value { return Value{typ: ScalarType(TypeInterval), iv: v} }
+func typedNullFromPlan(lt *LogicalType) Value {
+	v := Value{
+		kind: uint8(lt.Kind),
+		null: true,
+		decW: lt.DecimalWidth,
+		decS: lt.DecimalScale,
+	}
+	if lt.needsHeapMeta() {
+		v.lt = lt
+	}
+	return v
+}
+
+func BoolValue(v bool) Value {
+	var b uint64
+	if v {
+		b = 1
+	}
+	return Value{kind: uint8(TypeBoolean), lo: b}
+}
+
+func Int8Value(v int8) Value     { return Value{kind: uint8(TypeTinyint), lo: uint64(int64(v))} }
+func Int16Value(v int16) Value   { return Value{kind: uint8(TypeSmallint), lo: uint64(int64(v))} }
+func Int32Value(v int32) Value   { return Value{kind: uint8(TypeInteger), lo: uint64(int64(v))} }
+func Int64Value(v int64) Value   { return Value{kind: uint8(TypeBigint), lo: uint64(v)} }
+func Uint8Value(v uint8) Value   { return Value{kind: uint8(TypeUTinyint), lo: uint64(v)} }
+func Uint16Value(v uint16) Value { return Value{kind: uint8(TypeUSmallint), lo: uint64(v)} }
+func Uint32Value(v uint32) Value { return Value{kind: uint8(TypeUInteger), lo: uint64(v)} }
+func Uint64Value(v uint64) Value { return Value{kind: uint8(TypeUBigint), lo: v} }
+
+func HugeintValue(v Hugeint) Value {
+	return Value{kind: uint8(TypeHugeint), lo: v.Lower, hi: uint64(v.Upper)}
+}
+
+func UhugeintValue(v Uhugeint) Value {
+	return Value{kind: uint8(TypeUhugeint), lo: v.Lower, hi: v.Upper}
+}
+
+func Float32Value(v float32) Value {
+	return Value{kind: uint8(TypeFloat), lo: uint64(math.Float32bits(v))}
+}
+
+func Float64Value(v float64) Value {
+	return Value{kind: uint8(TypeDouble), lo: math.Float64bits(v)}
+}
+
+func VarcharValue(v string) Value {
+	return Value{kind: uint8(TypeVarchar), ref: v}
+}
+
+// JSONValue constructs a VARCHAR Value tagged with DuckDB's JSON logical type alias.
+func JSONValue(v string) Value {
+	return Value{kind: uint8(TypeVarchar), ref: v, lt: &jsonLogicalType}
+}
+
+func DateValue(v Date) Value     { return Value{kind: uint8(TypeDate), lo: uint64(int64(v.Days))} }
+func TimeValue(v Time) Value     { return Value{kind: uint8(TypeTime), lo: uint64(v.Micros)} }
+func TimeNSValue(v TimeNS) Value { return Value{kind: uint8(TypeTimeNS), lo: uint64(v.Nanos)} }
+
+// TimeTZValue validates t and wraps it as a TIMETZ Value.
+func TimeTZValue(t TimeTZ) (Value, error) {
+	if err := t.Validate(); err != nil {
+		return Value{}, err
+	}
+	return Value{
+		kind: uint8(TypeTimeTZ),
+		lo:   uint64(t.Micros),
+		hi:   uint64(int64(t.OffsetSeconds)),
+	}, nil
+}
+
+func IntervalValue(v Interval) Value {
+	return Value{
+		kind: uint8(TypeInterval),
+		lo:   uint64(v.Micros),
+		hi:   uint64(uint32(v.Months))<<32 | uint64(uint32(v.Days)),
+	}
+}
+
+// UUIDValue wraps a 16-byte UUID as a Value.
+func UUIDValue(u UUID) Value {
+	return Value{
+		kind: uint8(TypeUUID),
+		lo:   binary.BigEndian.Uint64(u[0:8]),
+		hi:   binary.BigEndian.Uint64(u[8:16]),
+	}
+}
+
+// EnumValue validates index against lt's ENUM dictionary and constructs an ENUM Value.
+func EnumValue(lt LogicalType, index uint32) (Value, error) {
+	if lt.Kind != TypeEnum || len(lt.EnumValues) == 0 {
+		return Value{}, fmt.Errorf("%w: EnumValue requires an ENUM LogicalType with at least one member", ErrInvalidInput)
+	}
+	if uint64(index) >= uint64(len(lt.EnumValues)) {
+		return Value{}, fmt.Errorf("%w: enum index %d out of range [0,%d)", ErrOutOfRange, index, len(lt.EnumValues))
+	}
+	cloned := cloneLogicalType(lt)
+	return Value{
+		kind: uint8(TypeEnum),
+		lo:   uint64(index),
+		ref:  cloned.EnumValues[index],
+		lt:   cloned,
+	}, nil
+}
 
 // DecimalValue wraps a validated Decimal as a Value.
 func DecimalValue(d Decimal) (Value, error) {
 	if err := d.Validate(); err != nil {
 		return Value{}, err
 	}
-	return Value{typ: DecimalType(d.Width, d.Scale), dec: d}, nil
+	return Value{
+		kind: uint8(TypeDecimal),
+		decW: d.Width,
+		decS: d.Scale,
+		lo:   d.Value.Lower,
+		hi:   uint64(d.Value.Upper),
+	}, nil
 }
 
 // BlobValue copies b into an owned BLOB Value. An empty non-null BLOB is
@@ -545,7 +835,7 @@ func DecimalValue(d Decimal) (Value, error) {
 func BlobValue(b []byte) Value {
 	cp := make([]byte, len(b))
 	copy(cp, b)
-	return Value{typ: ScalarType(TypeBlob), blob: cp}
+	return Value{kind: uint8(TypeBlob), ref: cp}
 }
 
 // TimestampValue wraps a Timestamp, rejecting TimestampUnitUnknown.
@@ -565,15 +855,179 @@ func TimestampValue(ts Timestamp) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("%w: invalid timestamp unit %d", ErrInvalidInput, ts.Unit)
 	}
-	return Value{typ: ScalarType(kind), ts: ts}, nil
+	return Value{kind: uint8(kind), lo: uint64(ts.Value), tsU: uint8(ts.Unit)}, nil
+}
+
+func validateLogicalType(lt LogicalType, depth int) error {
+	if depth > 64 {
+		return fmt.Errorf("%w: logical type nesting depth exceeds maximum", ErrLimitExceeded)
+	}
+	switch lt.Kind {
+	case TypeInvalid:
+		return fmt.Errorf("%w: invalid logical type", ErrInvalidInput)
+	case TypeDecimal:
+		if lt.DecimalWidth < 1 || lt.DecimalWidth > 38 || lt.DecimalScale > lt.DecimalWidth {
+			return fmt.Errorf("%w: invalid DECIMAL(%d,%d)", ErrInvalidInput, lt.DecimalWidth, lt.DecimalScale)
+		}
+		return nil
+	case TypeEnum:
+		if len(lt.EnumValues) == 0 {
+			return fmt.Errorf("%w: ENUM requires at least one dictionary member", ErrInvalidInput)
+		}
+		return nil
+	case TypeList:
+		if lt.Elem == nil {
+			return fmt.Errorf("%w: LIST requires non-nil Elem type", ErrInvalidInput)
+		}
+		return validateLogicalType(*lt.Elem, depth+1)
+	case TypeArray:
+		if lt.Elem == nil || lt.ArraySize == 0 {
+			return fmt.Errorf("%w: ARRAY requires non-nil Elem type and positive ArraySize", ErrInvalidInput)
+		}
+		return validateLogicalType(*lt.Elem, depth+1)
+	case TypeMap:
+		if lt.Key == nil || lt.Value == nil {
+			return fmt.Errorf("%w: MAP requires non-nil Key and Value types", ErrInvalidInput)
+		}
+		if err := validateLogicalType(*lt.Key, depth+1); err != nil {
+			return err
+		}
+		return validateLogicalType(*lt.Value, depth+1)
+	case TypeStruct:
+		if len(lt.Fields) == 0 {
+			return fmt.Errorf("%w: STRUCT requires at least one field", ErrInvalidInput)
+		}
+		for i, f := range lt.Fields {
+			if f.Name == "" {
+				return fmt.Errorf("%w: STRUCT field %d has empty name", ErrInvalidInput, i)
+			}
+			if err := validateLogicalType(f.Type, depth+1); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return nil
+	}
+}
+
+func checkElementType(elem Value, want LogicalType) error {
+	if elem.IsNull() {
+		if elem.Kind() != TypeInvalid && elem.Kind() != TypeSQLNull && !elem.Type().Equal(want) {
+			return fmt.Errorf("%w: null element has type %s, want %s", ErrTypeMismatch, elem.Type(), want)
+		}
+		return nil
+	}
+	if !elem.Type().Equal(want) {
+		return fmt.Errorf("%w: element has type %s, want %s", ErrTypeMismatch, elem.Type(), want)
+	}
+	return nil
+}
+
+// NewListValue validates elemType and elements and constructs an owned SQL LIST
+// Value suitable for parameter binding. An empty elements slice produces a
+// non-null empty list distinct from SQL NULL.
+func NewListValue(elemType LogicalType, elements []Value) (Value, error) {
+	if err := validateLogicalType(elemType, 0); err != nil {
+		return Value{}, err
+	}
+	for i, elem := range elements {
+		if err := checkElementType(elem, elemType); err != nil {
+			return Value{}, fmt.Errorf("list[%d]: %w", i, err)
+		}
+	}
+	lt := cloneLogicalType(ListType(elemType))
+	cp := make([]Value, len(elements))
+	copy(cp, elements)
+	return Value{kind: uint8(TypeList), ref: cp, lt: lt}, nil
+}
+
+// NewArrayValue validates elemType and elements and constructs an owned
+// fixed-length SQL ARRAY Value suitable for parameter binding.
+func NewArrayValue(elemType LogicalType, elements []Value) (Value, error) {
+	if len(elements) == 0 {
+		return Value{}, fmt.Errorf("%w: ARRAY requires at least one element", ErrInvalidInput)
+	}
+	if err := validateLogicalType(elemType, 0); err != nil {
+		return Value{}, err
+	}
+	for i, elem := range elements {
+		if err := checkElementType(elem, elemType); err != nil {
+			return Value{}, fmt.Errorf("array[%d]: %w", i, err)
+		}
+	}
+	lt := cloneLogicalType(ArrayType(elemType, uint64(len(elements))))
+	cp := make([]Value, len(elements))
+	copy(cp, elements)
+	return Value{kind: uint8(TypeArray), ref: cp, lt: lt}, nil
+}
+
+// NewStructValue validates fields and constructs an owned SQL STRUCT Value
+// suitable for parameter binding. When a field's Type is zero (TypeInvalid) and
+// its Value is non-null, the field Type is inferred from Value.Type().
+func NewStructValue(fields []StructFieldValue) (Value, error) {
+	if len(fields) == 0 {
+		return Value{}, fmt.Errorf("%w: STRUCT requires at least one field", ErrInvalidInput)
+	}
+	ftypes := make([]StructFieldType, len(fields))
+	cp := make([]StructFieldValue, len(fields))
+	for i, f := range fields {
+		if f.Name == "" {
+			return Value{}, fmt.Errorf("%w: struct field %d has empty name", ErrInvalidInput, i)
+		}
+		ft := f.Type
+		if ft.Kind == TypeInvalid {
+			if f.Value.IsNull() && f.Value.Kind() == TypeInvalid {
+				return Value{}, fmt.Errorf("%w: struct field %q requires an explicit Type when Value is untyped NULL", ErrInvalidInput, f.Name)
+			}
+			ft = f.Value.Type()
+		}
+		if err := validateLogicalType(ft, 0); err != nil {
+			return Value{}, fmt.Errorf("struct field %q: %w", f.Name, err)
+		}
+		if err := checkElementType(f.Value, ft); err != nil {
+			return Value{}, fmt.Errorf("struct field %q: %w", f.Name, err)
+		}
+		clonedFT := *cloneLogicalType(ft)
+		ftypes[i] = StructFieldType{Name: f.Name, Type: clonedFT}
+		cp[i] = StructFieldValue{Name: f.Name, Type: clonedFT, Value: f.Value}
+	}
+	lt := &LogicalType{Kind: TypeStruct, Fields: ftypes}
+	return Value{kind: uint8(TypeStruct), ref: cp, lt: lt}, nil
+}
+
+// NewMapValue validates keyType, valueType, and entries and constructs an owned
+// SQL MAP Value suitable for parameter binding. SQL NULL keys are rejected.
+func NewMapValue(keyType, valueType LogicalType, entries []MapEntry) (Value, error) {
+	if err := validateLogicalType(keyType, 0); err != nil {
+		return Value{}, err
+	}
+	if err := validateLogicalType(valueType, 0); err != nil {
+		return Value{}, err
+	}
+	for i, e := range entries {
+		if e.Key.IsNull() {
+			return Value{}, fmt.Errorf("%w: map[%d] key cannot be SQL NULL", ErrInvalidInput, i)
+		}
+		if !e.Key.Type().Equal(keyType) {
+			return Value{}, fmt.Errorf("map[%d] key: %w: have %s, want %s", i, ErrTypeMismatch, e.Key.Type(), keyType)
+		}
+		if err := checkElementType(e.Value, valueType); err != nil {
+			return Value{}, fmt.Errorf("map[%d] value: %w", i, err)
+		}
+	}
+	lt := cloneLogicalType(MapType(keyType, valueType))
+	cp := make([]MapEntry, len(entries))
+	copy(cp, entries)
+	return Value{kind: uint8(TypeMap), ref: cp, lt: lt}, nil
 }
 
 func (v Value) check(want TypeKind) error {
 	if v.null {
 		return ErrNullValue
 	}
-	if v.typ.Kind != want {
-		return fmt.Errorf("%w: have %s, want %s", ErrTypeMismatch, v.typ.Kind, want)
+	if TypeKind(v.kind) != want {
+		return fmt.Errorf("%w: have %s, want %s", ErrTypeMismatch, TypeKind(v.kind), want)
 	}
 	return nil
 }
@@ -582,63 +1036,63 @@ func (v Value) Bool() (bool, error) {
 	if err := v.check(TypeBoolean); err != nil {
 		return false, err
 	}
-	return v.b, nil
+	return v.lo != 0, nil
 }
 
 func (v Value) Int8() (int8, error) {
 	if err := v.check(TypeTinyint); err != nil {
 		return 0, err
 	}
-	return int8(v.i64), nil
+	return int8(int64(v.lo)), nil
 }
 
 func (v Value) Int16() (int16, error) {
 	if err := v.check(TypeSmallint); err != nil {
 		return 0, err
 	}
-	return int16(v.i64), nil
+	return int16(int64(v.lo)), nil
 }
 
 func (v Value) Int32() (int32, error) {
 	if err := v.check(TypeInteger); err != nil {
 		return 0, err
 	}
-	return int32(v.i64), nil
+	return int32(int64(v.lo)), nil
 }
 
 func (v Value) Int64() (int64, error) {
 	if err := v.check(TypeBigint); err != nil {
 		return 0, err
 	}
-	return v.i64, nil
+	return int64(v.lo), nil
 }
 
 func (v Value) Uint8() (uint8, error) {
 	if err := v.check(TypeUTinyint); err != nil {
 		return 0, err
 	}
-	return uint8(v.u64), nil
+	return uint8(v.lo), nil
 }
 
 func (v Value) Uint16() (uint16, error) {
 	if err := v.check(TypeUSmallint); err != nil {
 		return 0, err
 	}
-	return uint16(v.u64), nil
+	return uint16(v.lo), nil
 }
 
 func (v Value) Uint32() (uint32, error) {
 	if err := v.check(TypeUInteger); err != nil {
 		return 0, err
 	}
-	return uint32(v.u64), nil
+	return uint32(v.lo), nil
 }
 
 func (v Value) Uint64() (uint64, error) {
 	if err := v.check(TypeUBigint); err != nil {
 		return 0, err
 	}
-	return v.u64, nil
+	return v.lo, nil
 }
 
 // AsInt64 converts any exact integer Value (signed, unsigned, or 128-bit) to
@@ -647,28 +1101,30 @@ func (v Value) AsInt64() (int64, error) {
 	if v.null {
 		return 0, ErrNullValue
 	}
-	switch v.typ.Kind {
+	switch TypeKind(v.kind) {
 	case TypeTinyint, TypeSmallint, TypeInteger, TypeBigint:
-		return v.i64, nil
+		return int64(v.lo), nil
 	case TypeUTinyint, TypeUSmallint, TypeUInteger, TypeUBigint:
-		if v.u64 > math.MaxInt64 {
-			return 0, fmt.Errorf("%w: uint value %d exceeds int64", ErrOutOfRange, v.u64)
+		if v.lo > math.MaxInt64 {
+			return 0, fmt.Errorf("%w: uint value %d exceeds int64", ErrOutOfRange, v.lo)
 		}
-		return int64(v.u64), nil
+		return int64(v.lo), nil
 	case TypeHugeint:
-		n, ok := v.huge.Int64()
+		h := Hugeint{Lower: v.lo, Upper: int64(v.hi)}
+		n, ok := h.Int64()
 		if !ok {
-			return 0, fmt.Errorf("%w: HUGEINT %s outside int64", ErrOutOfRange, v.huge.String())
+			return 0, fmt.Errorf("%w: HUGEINT %s outside int64", ErrOutOfRange, h.String())
 		}
 		return n, nil
 	case TypeUhugeint:
-		u, ok := v.uhuge.Uint64()
-		if !ok || u > math.MaxInt64 {
-			return 0, fmt.Errorf("%w: UHUGEINT %s exceeds int64", ErrOutOfRange, v.uhuge.String())
+		u := Uhugeint{Lower: v.lo, Upper: v.hi}
+		n, ok := u.Uint64()
+		if !ok || n > math.MaxInt64 {
+			return 0, fmt.Errorf("%w: UHUGEINT %s exceeds int64", ErrOutOfRange, u.String())
 		}
-		return int64(u), nil
+		return int64(n), nil
 	default:
-		return 0, fmt.Errorf("%w: %s is not an integer", ErrTypeMismatch, v.typ.Kind)
+		return 0, fmt.Errorf("%w: %s is not an integer", ErrTypeMismatch, TypeKind(v.kind))
 	}
 }
 
@@ -677,27 +1133,30 @@ func (v Value) AsUint64() (uint64, error) {
 	if v.null {
 		return 0, ErrNullValue
 	}
-	switch v.typ.Kind {
+	switch TypeKind(v.kind) {
 	case TypeTinyint, TypeSmallint, TypeInteger, TypeBigint:
-		if v.i64 < 0 {
-			return 0, fmt.Errorf("%w: negative integer %d", ErrOutOfRange, v.i64)
+		n := int64(v.lo)
+		if n < 0 {
+			return 0, fmt.Errorf("%w: negative integer %d", ErrOutOfRange, n)
 		}
-		return uint64(v.i64), nil
+		return uint64(n), nil
 	case TypeUTinyint, TypeUSmallint, TypeUInteger, TypeUBigint:
-		return v.u64, nil
+		return v.lo, nil
 	case TypeHugeint:
-		if v.huge.Upper != 0 {
-			return 0, fmt.Errorf("%w: HUGEINT %s outside uint64", ErrOutOfRange, v.huge.String())
+		h := Hugeint{Lower: v.lo, Upper: int64(v.hi)}
+		if h.Upper != 0 {
+			return 0, fmt.Errorf("%w: HUGEINT %s outside uint64", ErrOutOfRange, h.String())
 		}
-		return v.huge.Lower, nil
+		return h.Lower, nil
 	case TypeUhugeint:
-		u, ok := v.uhuge.Uint64()
+		u := Uhugeint{Lower: v.lo, Upper: v.hi}
+		n, ok := u.Uint64()
 		if !ok {
-			return 0, fmt.Errorf("%w: UHUGEINT %s exceeds uint64", ErrOutOfRange, v.uhuge.String())
+			return 0, fmt.Errorf("%w: UHUGEINT %s exceeds uint64", ErrOutOfRange, u.String())
 		}
-		return u, nil
+		return n, nil
 	default:
-		return 0, fmt.Errorf("%w: %s is not an integer", ErrTypeMismatch, v.typ.Kind)
+		return 0, fmt.Errorf("%w: %s is not an integer", ErrTypeMismatch, TypeKind(v.kind))
 	}
 }
 
@@ -705,42 +1164,47 @@ func (v Value) Hugeint() (Hugeint, error) {
 	if err := v.check(TypeHugeint); err != nil {
 		return Hugeint{}, err
 	}
-	return v.huge, nil
+	return Hugeint{Lower: v.lo, Upper: int64(v.hi)}, nil
 }
 
 func (v Value) Uhugeint() (Uhugeint, error) {
 	if err := v.check(TypeUhugeint); err != nil {
 		return Uhugeint{}, err
 	}
-	return v.uhuge, nil
+	return Uhugeint{Lower: v.lo, Upper: v.hi}, nil
 }
 
 func (v Value) Decimal() (Decimal, error) {
 	if err := v.check(TypeDecimal); err != nil {
 		return Decimal{}, err
 	}
-	return v.dec, nil
+	return Decimal{
+		Width: v.decW,
+		Scale: v.decS,
+		Value: Hugeint{Lower: v.lo, Upper: int64(v.hi)},
+	}, nil
 }
 
 func (v Value) Float32() (float32, error) {
 	if err := v.check(TypeFloat); err != nil {
 		return 0, err
 	}
-	return v.f32, nil
+	return math.Float32frombits(uint32(v.lo)), nil
 }
 
 func (v Value) Float64() (float64, error) {
 	if err := v.check(TypeDouble); err != nil {
 		return 0, err
 	}
-	return v.f64, nil
+	return math.Float64frombits(v.lo), nil
 }
 
 func (v Value) Varchar() (string, error) {
 	if err := v.check(TypeVarchar); err != nil {
 		return "", err
 	}
-	return v.str, nil
+	s, _ := v.ref.(string)
+	return s, nil
 }
 
 // Blob returns a fresh owned byte slice copy.
@@ -748,8 +1212,9 @@ func (v Value) Blob() ([]byte, error) {
 	if err := v.check(TypeBlob); err != nil {
 		return nil, err
 	}
-	cp := make([]byte, len(v.blob))
-	copy(cp, v.blob)
+	src, _ := v.ref.([]byte)
+	cp := make([]byte, len(src))
+	copy(cp, src)
 	return cp, nil
 }
 
@@ -757,32 +1222,42 @@ func (v Value) Date() (Date, error) {
 	if err := v.check(TypeDate); err != nil {
 		return Date{}, err
 	}
-	return Date{Days: int32(v.i64)}, nil
+	return Date{Days: int32(int64(v.lo))}, nil
 }
 
 func (v Value) Time() (Time, error) {
 	if err := v.check(TypeTime); err != nil {
 		return Time{}, err
 	}
-	return Time{Micros: v.i64}, nil
+	return Time{Micros: int64(v.lo)}, nil
 }
 
 func (v Value) TimeNS() (TimeNS, error) {
 	if err := v.check(TypeTimeNS); err != nil {
 		return TimeNS{}, err
 	}
-	return TimeNS{Nanos: v.i64}, nil
+	return TimeNS{Nanos: int64(v.lo)}, nil
+}
+
+func (v Value) TimeTZ() (TimeTZ, error) {
+	if err := v.check(TypeTimeTZ); err != nil {
+		return TimeTZ{}, err
+	}
+	return TimeTZ{
+		Micros:        int64(v.lo),
+		OffsetSeconds: int32(int64(v.hi)),
+	}, nil
 }
 
 func (v Value) Timestamp() (Timestamp, error) {
 	if v.null {
 		return Timestamp{}, ErrNullValue
 	}
-	switch v.typ.Kind {
+	switch TypeKind(v.kind) {
 	case TypeTimestamp, TypeTimestampS, TypeTimestampMS, TypeTimestampNS, TypeTimestampTZ:
-		return v.ts, nil
+		return Timestamp{Value: int64(v.lo), Unit: TimestampUnit(v.tsU)}, nil
 	default:
-		return Timestamp{}, fmt.Errorf("%w: have %s, want TIMESTAMP*", ErrTypeMismatch, v.typ.Kind)
+		return Timestamp{}, fmt.Errorf("%w: have %s, want TIMESTAMP*", ErrTypeMismatch, TypeKind(v.kind))
 	}
 }
 
@@ -790,16 +1265,43 @@ func (v Value) Interval() (Interval, error) {
 	if err := v.check(TypeInterval); err != nil {
 		return Interval{}, err
 	}
-	return v.iv, nil
+	return Interval{
+		Months: int32(uint32(v.hi >> 32)),
+		Days:   int32(uint32(v.hi)),
+		Micros: int64(v.lo),
+	}, nil
+}
+
+func (v Value) UUID() (UUID, error) {
+	if err := v.check(TypeUUID); err != nil {
+		return UUID{}, err
+	}
+	var u UUID
+	binary.BigEndian.PutUint64(u[0:8], v.lo)
+	binary.BigEndian.PutUint64(u[8:16], v.hi)
+	return u, nil
+}
+
+func (v Value) Enum() (Enum, error) {
+	if err := v.check(TypeEnum); err != nil {
+		return Enum{}, err
+	}
+	label, _ := v.ref.(string)
+	return Enum{Index: uint32(v.lo), Label: label}, nil
 }
 
 func (v Value) List() (ListValue, error) {
 	if err := v.check(TypeList); err != nil {
 		return ListValue{}, err
 	}
+	elems, _ := v.ref.([]Value)
+	var elemType LogicalType
+	if v.lt != nil && v.lt.Elem != nil {
+		elemType = *v.lt.Elem
+	}
 	return ListValue{
-		ElemType: v.list.ElemType,
-		Elements: append([]Value{}, v.list.Elements...),
+		ElemType: elemType,
+		Elements: append([]Value{}, elems...),
 	}, nil
 }
 
@@ -807,10 +1309,19 @@ func (v Value) Array() (ArrayValue, error) {
 	if err := v.check(TypeArray); err != nil {
 		return ArrayValue{}, err
 	}
+	elems, _ := v.ref.([]Value)
+	var elemType LogicalType
+	var size uint64
+	if v.lt != nil {
+		size = v.lt.ArraySize
+		if v.lt.Elem != nil {
+			elemType = *v.lt.Elem
+		}
+	}
 	return ArrayValue{
-		ElemType: v.arr.ElemType,
-		Size:     v.arr.Size,
-		Elements: append([]Value{}, v.arr.Elements...),
+		ElemType: elemType,
+		Size:     size,
+		Elements: append([]Value{}, elems...),
 	}, nil
 }
 
@@ -818,8 +1329,9 @@ func (v Value) Struct() (StructValue, error) {
 	if err := v.check(TypeStruct); err != nil {
 		return StructValue{}, err
 	}
+	fields, _ := v.ref.([]StructFieldValue)
 	return StructValue{
-		Fields: append([]StructFieldValue{}, v.st.Fields...),
+		Fields: append([]StructFieldValue{}, fields...),
 	}, nil
 }
 
@@ -827,9 +1339,19 @@ func (v Value) Map() (MapValue, error) {
 	if err := v.check(TypeMap); err != nil {
 		return MapValue{}, err
 	}
+	entries, _ := v.ref.([]MapEntry)
+	var keyType, valType LogicalType
+	if v.lt != nil {
+		if v.lt.Key != nil {
+			keyType = *v.lt.Key
+		}
+		if v.lt.Value != nil {
+			valType = *v.lt.Value
+		}
+	}
 	return MapValue{
-		KeyType:   v.mp.KeyType,
-		ValueType: v.mp.ValueType,
-		Entries:   append([]MapEntry{}, v.mp.Entries...),
+		KeyType:   keyType,
+		ValueType: valType,
+		Entries:   append([]MapEntry{}, entries...),
 	}, nil
 }

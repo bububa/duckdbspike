@@ -47,6 +47,7 @@ func (l DecodeLimits) normalized() (DecodeLimits, error) {
 type columnPlan struct {
 	lt              LogicalType
 	decimalInternal int32
+	enumInternal    int32
 	elem            *columnPlan
 	key             *columnPlan
 	val             *columnPlan
@@ -58,6 +59,19 @@ type columnFieldPlan struct {
 	plan columnPlan
 }
 
+func readLogicalTypeAlias(api *abi.API, lt uintptr) string {
+	if api.LogicalTypeGetAlias == nil {
+		return ""
+	}
+	ptr := api.LogicalTypeGetAlias(lt)
+	if ptr == 0 {
+		return ""
+	}
+	alias := abi.GoString(ptr)
+	api.Free(ptr)
+	return alias
+}
+
 func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (columnPlan, error) {
 	if lt == 0 {
 		return columnPlan{}, fmt.Errorf("%w: null logical type", ErrUnsupportedType)
@@ -66,55 +80,64 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		return columnPlan{}, fmt.Errorf("%w: nesting depth %d exceeds %d", ErrLimitExceeded, depth, limits.MaxNestingDepth)
 	}
 	id := api.GetTypeID(lt)
+	alias := readLogicalTypeAlias(api, lt)
+
+	var plan columnPlan
 	switch id {
 	case abi.TypeBoolean:
-		return columnPlan{lt: ScalarType(TypeBoolean)}, nil
+		plan = columnPlan{lt: ScalarType(TypeBoolean)}
 	case abi.TypeTinyint:
-		return columnPlan{lt: ScalarType(TypeTinyint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTinyint)}
 	case abi.TypeSmallint:
-		return columnPlan{lt: ScalarType(TypeSmallint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeSmallint)}
 	case abi.TypeInteger:
-		return columnPlan{lt: ScalarType(TypeInteger)}, nil
+		plan = columnPlan{lt: ScalarType(TypeInteger)}
 	case abi.TypeBigint:
-		return columnPlan{lt: ScalarType(TypeBigint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeBigint)}
 	case abi.TypeUTinyint:
-		return columnPlan{lt: ScalarType(TypeUTinyint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeUTinyint)}
 	case abi.TypeUSmallint:
-		return columnPlan{lt: ScalarType(TypeUSmallint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeUSmallint)}
 	case abi.TypeUInteger:
-		return columnPlan{lt: ScalarType(TypeUInteger)}, nil
+		plan = columnPlan{lt: ScalarType(TypeUInteger)}
 	case abi.TypeUBigint:
-		return columnPlan{lt: ScalarType(TypeUBigint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeUBigint)}
 	case abi.TypeHugeint:
-		return columnPlan{lt: ScalarType(TypeHugeint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeHugeint)}
 	case abi.TypeUHugeint:
-		return columnPlan{lt: ScalarType(TypeUhugeint)}, nil
+		plan = columnPlan{lt: ScalarType(TypeUhugeint)}
 	case abi.TypeFloat:
-		return columnPlan{lt: ScalarType(TypeFloat)}, nil
+		plan = columnPlan{lt: ScalarType(TypeFloat)}
 	case abi.TypeDouble:
-		return columnPlan{lt: ScalarType(TypeDouble)}, nil
+		plan = columnPlan{lt: ScalarType(TypeDouble)}
 	case abi.TypeVarchar:
-		return columnPlan{lt: ScalarType(TypeVarchar)}, nil
+		plan = columnPlan{lt: ScalarType(TypeVarchar)}
 	case abi.TypeBlob:
-		return columnPlan{lt: ScalarType(TypeBlob)}, nil
+		plan = columnPlan{lt: ScalarType(TypeBlob)}
 	case abi.TypeDate:
-		return columnPlan{lt: ScalarType(TypeDate)}, nil
+		plan = columnPlan{lt: ScalarType(TypeDate)}
 	case abi.TypeTime:
-		return columnPlan{lt: ScalarType(TypeTime)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTime)}
 	case abi.TypeTimeNS:
-		return columnPlan{lt: ScalarType(TypeTimeNS)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimeNS)}
+	case abi.TypeTimeTZ:
+		plan = columnPlan{lt: ScalarType(TypeTimeTZ)}
 	case abi.TypeTimestamp:
-		return columnPlan{lt: ScalarType(TypeTimestamp)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimestamp)}
 	case abi.TypeTimestampS:
-		return columnPlan{lt: ScalarType(TypeTimestampS)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimestampS)}
 	case abi.TypeTimestampMS:
-		return columnPlan{lt: ScalarType(TypeTimestampMS)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimestampMS)}
 	case abi.TypeTimestampNS:
-		return columnPlan{lt: ScalarType(TypeTimestampNS)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimestampNS)}
 	case abi.TypeTimestampTZ:
-		return columnPlan{lt: ScalarType(TypeTimestampTZ)}, nil
+		plan = columnPlan{lt: ScalarType(TypeTimestampTZ)}
 	case abi.TypeInterval:
-		return columnPlan{lt: ScalarType(TypeInterval)}, nil
+		plan = columnPlan{lt: ScalarType(TypeInterval)}
+	case abi.TypeUUID:
+		plan = columnPlan{lt: ScalarType(TypeUUID)}
+	case abi.TypeSQLNull:
+		plan = columnPlan{lt: ScalarType(TypeSQLNull)}
 	case abi.TypeDecimal:
 		width := api.DecimalWidth(lt)
 		scale := api.DecimalScale(lt)
@@ -127,10 +150,37 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		default:
 			return columnPlan{}, fmt.Errorf("%w: unsupported DECIMAL physical type %d", ErrUnsupportedType, internal)
 		}
-		return columnPlan{
+		plan = columnPlan{
 			lt:              DecimalType(width, scale),
 			decimalInternal: internal,
-		}, nil
+		}
+	case abi.TypeEnum:
+		internal := api.EnumInternalType(lt)
+		switch internal {
+		case abi.TypeUTinyint, abi.TypeUSmallint, abi.TypeUInteger:
+		default:
+			return columnPlan{}, fmt.Errorf("%w: unsupported ENUM physical type %d", ErrUnsupportedType, internal)
+		}
+		dictSize := uint64(api.EnumDictionarySize(lt))
+		if dictSize > limits.MaxCollectionLen || dictSize > math.MaxInt {
+			return columnPlan{}, fmt.Errorf("%w: enum dictionary size %d exceeds %d", ErrLimitExceeded, dictSize, limits.MaxCollectionLen)
+		}
+		values := make([]string, int(dictSize))
+		for i := uint64(0); i < dictSize; i++ {
+			ptr := api.EnumDictionaryValue(lt, i)
+			label := abi.GoString(ptr)
+			if ptr != 0 {
+				api.Free(ptr)
+			}
+			if uint64(len(label)) > limits.MaxValueBytes {
+				return columnPlan{}, fmt.Errorf("%w: enum label length %d exceeds %d", ErrLimitExceeded, len(label), limits.MaxValueBytes)
+			}
+			values[i] = label
+		}
+		plan = columnPlan{
+			lt:           LogicalType{Kind: TypeEnum, EnumValues: values},
+			enumInternal: internal,
+		}
 	case abi.TypeList:
 		childLT := api.ListTypeChildType(lt)
 		defer api.DestroyLogicalType(&childLT)
@@ -139,10 +189,10 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			return columnPlan{}, err
 		}
 		elemLT := childPlan.lt
-		return columnPlan{
+		plan = columnPlan{
 			lt:   LogicalType{Kind: TypeList, Elem: &elemLT},
 			elem: &childPlan,
-		}, nil
+		}
 	case abi.TypeArray:
 		size := api.ArrayTypeArraySize(lt)
 		if size > limits.MaxCollectionLen {
@@ -155,10 +205,10 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			return columnPlan{}, err
 		}
 		elemLT := childPlan.lt
-		return columnPlan{
+		plan = columnPlan{
 			lt:   LogicalType{Kind: TypeArray, ArraySize: size, Elem: &elemLT},
 			elem: &childPlan,
-		}, nil
+		}
 	case abi.TypeMap:
 		keyLT := api.MapTypeKeyType(lt)
 		valLT := api.MapTypeValueType(lt)
@@ -173,11 +223,11 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			return columnPlan{}, err
 		}
 		kLT, vLT := keyPlan.lt, valPlan.lt
-		return columnPlan{
+		plan = columnPlan{
 			lt:  LogicalType{Kind: TypeMap, Key: &kLT, Value: &vLT},
 			key: &keyPlan,
 			val: &valPlan,
-		}, nil
+		}
 	case abi.TypeStruct:
 		count := api.StructTypeChildCount(lt)
 		if count > limits.MaxCollectionLen || count > math.MaxInt {
@@ -200,13 +250,15 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			fields = append(fields, StructFieldType{Name: name, Type: childPlan.lt})
 			fieldPlans = append(fieldPlans, columnFieldPlan{name: name, plan: childPlan})
 		}
-		return columnPlan{
+		plan = columnPlan{
 			lt:     LogicalType{Kind: TypeStruct, Fields: fields},
 			fields: fieldPlans,
-		}, nil
+		}
 	default:
 		return columnPlan{}, fmt.Errorf("%w: native type id %d", ErrUnsupportedType, id)
 	}
+	plan.lt.Alias = alias
+	return plan, nil
 }
 
 func rowValid(validity uintptr, row uint64) bool {
@@ -239,12 +291,22 @@ func copyNativeBytes(base uintptr, length uint64) ([]byte, error) {
 	return out, nil
 }
 
+func attachPlanAlias(v Value, plan *columnPlan) Value {
+	if plan.lt.Alias != "" && v.lt == nil {
+		v.lt = &plan.lt
+	}
+	return v
+}
+
 func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, limits DecodeLimits) (Value, error) {
+	if plan.lt.Kind == TypeSQLNull {
+		return typedNullFromPlan(&plan.lt), nil
+	}
 	if vec == 0 {
 		return Value{}, fmt.Errorf("%w: null native vector", ErrInvalidInput)
 	}
 	if !rowValid(api.VectorGetValidity(vec), row) {
-		return TypedNullValue(plan.lt), nil
+		return typedNullFromPlan(&plan.lt), nil
 	}
 
 	switch plan.lt.Kind {
@@ -263,8 +325,9 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			}
 		}
 		return Value{
-			typ: plan.lt,
-			st:  StructValue{Fields: fields},
+			kind: uint8(TypeStruct),
+			ref:  fields,
+			lt:   &plan.lt,
 		}, nil
 
 	case TypeArray:
@@ -289,8 +352,9 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			elems[j] = v
 		}
 		return Value{
-			typ: plan.lt,
-			arr: ArrayValue{ElemType: plan.elem.lt, Size: size, Elements: elems},
+			kind: uint8(TypeArray),
+			ref:  elems,
+			lt:   &plan.lt,
 		}, nil
 	}
 
@@ -301,33 +365,33 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 
 	switch plan.lt.Kind {
 	case TypeBoolean:
-		return BoolValue(readAt[byte](data, row) != 0), nil
+		return attachPlanAlias(BoolValue(readAt[byte](data, row) != 0), plan), nil
 	case TypeTinyint:
-		return Int8Value(readAt[int8](data, row)), nil
+		return attachPlanAlias(Int8Value(readAt[int8](data, row)), plan), nil
 	case TypeSmallint:
-		return Int16Value(readAt[int16](data, row)), nil
+		return attachPlanAlias(Int16Value(readAt[int16](data, row)), plan), nil
 	case TypeInteger:
-		return Int32Value(readAt[int32](data, row)), nil
+		return attachPlanAlias(Int32Value(readAt[int32](data, row)), plan), nil
 	case TypeBigint:
-		return Int64Value(readAt[int64](data, row)), nil
+		return attachPlanAlias(Int64Value(readAt[int64](data, row)), plan), nil
 	case TypeUTinyint:
-		return Uint8Value(readAt[uint8](data, row)), nil
+		return attachPlanAlias(Uint8Value(readAt[uint8](data, row)), plan), nil
 	case TypeUSmallint:
-		return Uint16Value(readAt[uint16](data, row)), nil
+		return attachPlanAlias(Uint16Value(readAt[uint16](data, row)), plan), nil
 	case TypeUInteger:
-		return Uint32Value(readAt[uint32](data, row)), nil
+		return attachPlanAlias(Uint32Value(readAt[uint32](data, row)), plan), nil
 	case TypeUBigint:
-		return Uint64Value(readAt[uint64](data, row)), nil
+		return attachPlanAlias(Uint64Value(readAt[uint64](data, row)), plan), nil
 	case TypeHugeint:
 		h := readAt[abi.Hugeint](data, row)
-		return HugeintValue(Hugeint{Lower: h.Lower, Upper: h.Upper}), nil
+		return attachPlanAlias(HugeintValue(Hugeint{Lower: h.Lower, Upper: h.Upper}), plan), nil
 	case TypeUhugeint:
 		u := readAt[abi.Uhugeint](data, row)
-		return UhugeintValue(Uhugeint{Lower: u.Lower, Upper: u.Upper}), nil
+		return attachPlanAlias(UhugeintValue(Uhugeint{Lower: u.Lower, Upper: u.Upper}), plan), nil
 	case TypeFloat:
-		return Float32Value(readAt[float32](data, row)), nil
+		return attachPlanAlias(Float32Value(readAt[float32](data, row)), plan), nil
 	case TypeDouble:
-		return Float64Value(readAt[float64](data, row)), nil
+		return attachPlanAlias(Float64Value(readAt[float64](data, row)), plan), nil
 	case TypeDecimal:
 		var coef Hugeint
 		switch plan.decimalInternal {
@@ -343,11 +407,15 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 		default:
 			return Value{}, fmt.Errorf("%w: unsupported DECIMAL physical type %d", ErrUnsupportedType, plan.decimalInternal)
 		}
-		return DecimalValue(Decimal{
+		v, err := DecimalValue(Decimal{
 			Width: plan.lt.DecimalWidth,
 			Scale: plan.lt.DecimalScale,
 			Value: coef,
 		})
+		if err != nil {
+			return Value{}, err
+		}
+		return attachPlanAlias(v, plan), nil
 	case TypeVarchar, TypeBlob:
 		const stride = uint64(unsafe.Sizeof(abi.StringT{}))
 		if row > math.MaxUint64/stride {
@@ -370,28 +438,73 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			return Value{}, err
 		}
 		if plan.lt.Kind == TypeVarchar {
-			return VarcharValue(string(raw)), nil
+			return attachPlanAlias(VarcharValue(string(raw)), plan), nil
 		}
-		return Value{typ: ScalarType(TypeBlob), blob: raw}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeBlob), ref: raw}, plan), nil
 	case TypeDate:
-		return DateValue(Date{Days: readAt[int32](data, row)}), nil
+		return attachPlanAlias(DateValue(Date{Days: readAt[int32](data, row)}), plan), nil
 	case TypeTime:
-		return TimeValue(Time{Micros: readAt[int64](data, row)}), nil
+		return attachPlanAlias(TimeValue(Time{Micros: readAt[int64](data, row)}), plan), nil
 	case TypeTimeNS:
-		return TimeNSValue(TimeNS{Nanos: readAt[int64](data, row)}), nil
+		return attachPlanAlias(TimeNSValue(TimeNS{Nanos: readAt[int64](data, row)}), plan), nil
+	case TypeTimeTZ:
+		const (
+			timeTZOffsetBits = 24
+			timeTZOffsetMask = (uint64(1) << timeTZOffsetBits) - 1
+		)
+		bits := readAt[abi.TimeTZ](data, row).Bits
+		micros := int64(bits >> timeTZOffsetBits)
+		offset := timeTZMaxOffset - int32(bits&timeTZOffsetMask)
+		v := Value{
+			kind: uint8(TypeTimeTZ),
+			lo:   uint64(micros),
+			hi:   uint64(int64(offset)),
+		}
+		return attachPlanAlias(v, plan), nil
 	case TypeTimestamp:
-		return Value{typ: ScalarType(TypeTimestamp), ts: Timestamp{Value: readAt[int64](data, row), Unit: TimestampUnitMicros}}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeTimestamp), lo: uint64(readAt[int64](data, row)), tsU: uint8(TimestampUnitMicros)}, plan), nil
 	case TypeTimestampS:
-		return Value{typ: ScalarType(TypeTimestampS), ts: Timestamp{Value: readAt[int64](data, row), Unit: TimestampUnitSeconds}}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeTimestampS), lo: uint64(readAt[int64](data, row)), tsU: uint8(TimestampUnitSeconds)}, plan), nil
 	case TypeTimestampMS:
-		return Value{typ: ScalarType(TypeTimestampMS), ts: Timestamp{Value: readAt[int64](data, row), Unit: TimestampUnitMillis}}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeTimestampMS), lo: uint64(readAt[int64](data, row)), tsU: uint8(TimestampUnitMillis)}, plan), nil
 	case TypeTimestampNS:
-		return Value{typ: ScalarType(TypeTimestampNS), ts: Timestamp{Value: readAt[int64](data, row), Unit: TimestampUnitNanos}}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeTimestampNS), lo: uint64(readAt[int64](data, row)), tsU: uint8(TimestampUnitNanos)}, plan), nil
 	case TypeTimestampTZ:
-		return Value{typ: ScalarType(TypeTimestampTZ), ts: Timestamp{Value: readAt[int64](data, row), Unit: TimestampUnitTZ}}, nil
+		return attachPlanAlias(Value{kind: uint8(TypeTimestampTZ), lo: uint64(readAt[int64](data, row)), tsU: uint8(TimestampUnitTZ)}, plan), nil
 	case TypeInterval:
 		iv := readAt[abi.Interval](data, row)
-		return IntervalValue(Interval{Months: iv.Months, Days: iv.Days, Micros: iv.Micros}), nil
+		return attachPlanAlias(IntervalValue(Interval{Months: iv.Months, Days: iv.Days, Micros: iv.Micros}), plan), nil
+	case TypeUUID:
+		h := readAt[abi.Hugeint](data, row)
+		// DuckDB stores UUID vectors as hugeint with the sign bit (MSB) flipped
+		// so signed 128-bit ordering matches lexicographical UUID ordering.
+		v := Value{
+			kind: uint8(TypeUUID),
+			lo:   uint64(h.Upper) ^ (uint64(1) << 63),
+			hi:   h.Lower,
+		}
+		return attachPlanAlias(v, plan), nil
+	case TypeEnum:
+		var idx uint32
+		switch plan.enumInternal {
+		case abi.TypeUTinyint:
+			idx = uint32(readAt[uint8](data, row))
+		case abi.TypeUSmallint:
+			idx = uint32(readAt[uint16](data, row))
+		case abi.TypeUInteger:
+			idx = readAt[uint32](data, row)
+		default:
+			return Value{}, fmt.Errorf("%w: unsupported ENUM physical type %d", ErrUnsupportedType, plan.enumInternal)
+		}
+		if uint64(idx) >= uint64(len(plan.lt.EnumValues)) {
+			return Value{}, fmt.Errorf("%w: enum index %d out of range [0,%d)", ErrOutOfRange, idx, len(plan.lt.EnumValues))
+		}
+		return Value{
+			kind: uint8(TypeEnum),
+			lo:   uint64(idx),
+			ref:  plan.lt.EnumValues[idx],
+			lt:   &plan.lt,
+		}, nil
 	case TypeList:
 		entry := readAt[abi.ListEntry](data, row)
 		if entry.Length > limits.MaxCollectionLen || entry.Length > math.MaxInt {
@@ -414,8 +527,9 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			elems[j] = v
 		}
 		return Value{
-			typ:  plan.lt,
-			list: ListValue{ElemType: plan.elem.lt, Elements: elems},
+			kind: uint8(TypeList),
+			ref:  elems,
+			lt:   &plan.lt,
 		}, nil
 	case TypeMap:
 		entry := readAt[abi.ListEntry](data, row)
@@ -445,8 +559,9 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			entries[j] = MapEntry{Key: k, Value: v}
 		}
 		return Value{
-			typ: plan.lt,
-			mp:  MapValue{KeyType: plan.key.lt, ValueType: plan.val.lt, Entries: entries},
+			kind: uint8(TypeMap),
+			ref:  entries,
+			lt:   &plan.lt,
 		}, nil
 	default:
 		return Value{}, fmt.Errorf("%w: %s", ErrUnsupportedType, plan.lt.Kind)

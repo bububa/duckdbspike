@@ -326,7 +326,7 @@ func valueBytes(v Value) uint64 {
 	if v.null {
 		return 8
 	}
-	switch v.typ.Kind {
+	switch v.Kind() {
 	case TypeBoolean, TypeTinyint, TypeUTinyint:
 		return 1
 	case TypeSmallint, TypeUSmallint:
@@ -336,35 +336,44 @@ func valueBytes(v Value) uint64 {
 	case TypeBigint, TypeUBigint, TypeDouble, TypeTime, TypeTimeNS,
 		TypeTimestamp, TypeTimestampS, TypeTimestampMS, TypeTimestampNS, TypeTimestampTZ:
 		return 8
-	case TypeHugeint, TypeUhugeint, TypeInterval:
+	case TypeTimeTZ, TypeHugeint, TypeUhugeint, TypeInterval, TypeUUID:
 		return 16
 	case TypeDecimal:
 		return 24
 	case TypeVarchar:
-		return 16 + uint64(len(v.str))
+		s, _ := v.ref.(string)
+		return 16 + uint64(len(s))
+	case TypeEnum:
+		s, _ := v.ref.(string)
+		return 16 + uint64(len(s))
 	case TypeBlob:
-		return 24 + uint64(len(v.blob))
+		b, _ := v.ref.([]byte)
+		return 24 + uint64(len(b))
 	case TypeList:
+		elems, _ := v.ref.([]Value)
 		total := uint64(24)
-		for _, elem := range v.list.Elements {
+		for _, elem := range elems {
 			total += valueBytes(elem)
 		}
 		return total
 	case TypeArray:
+		elems, _ := v.ref.([]Value)
 		total := uint64(24)
-		for _, elem := range v.arr.Elements {
+		for _, elem := range elems {
 			total += valueBytes(elem)
 		}
 		return total
 	case TypeStruct:
+		fields, _ := v.ref.([]StructFieldValue)
 		total := uint64(24)
-		for _, f := range v.st.Fields {
+		for _, f := range fields {
 			total += 16 + uint64(len(f.Name)) + valueBytes(f.Value)
 		}
 		return total
 	case TypeMap:
+		entries, _ := v.ref.([]MapEntry)
 		total := uint64(24)
-		for _, e := range v.mp.Entries {
+		for _, e := range entries {
 			total += valueBytes(e.Key) + valueBytes(e.Value)
 		}
 		return total
