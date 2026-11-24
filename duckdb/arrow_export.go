@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/bububa/duckdbspike/internal/abi"
@@ -230,21 +231,244 @@ func buildExportedArray(arena *arrowPinArena, spec ArrowArraySpec, depth int) (*
 	return raw, nil
 }
 
+// ArrowStreamProvider supplies a schema and a sequence of ArrowArrays to
+// Conn.RegisterArrowStream. Next must return (nil, nil) on clean end-of-stream.
+// Close is called once when the registered ArrowView is closed or if
+// registration fails after taking ownership of provider.
+type ArrowStreamProvider interface {
+	Schema() (*ArrowSchema, error)
+	Next() (*ArrowArray, error)
+	Close() error
+}
+
 // ArrowView owns a temporary DuckDB view registered from an Arrow C Data
-// Interface schema and array via duckdb_arrow_array_scan. Because DuckDB's
-// underlying array-scan stream drains on first scan, an ArrowView is intended
-// for single-scan queries; call Close when done to drop the view, destroy the
-// native stream, and release the backing ArrowSchema and ArrowArray.
+// Interface schema/array (duckdb_arrow_array_scan) or streaming provider
+// (duckdb_arrow_scan). Call Close when done to drop the view, destroy/release
+// the native stream, and release all backing Arrow resources.
 type ArrowView struct {
-	_         noCopy
-	conn      *Conn
-	name      string
-	stream    uintptr
-	schemaRaw *abi.ArrowSchema
-	schemaRel func(*abi.ArrowSchema)
-	arrayRaw  *abi.ArrowArray
-	arrayRel  func(*abi.ArrowArray)
-	closed    bool
+	_            noCopy
+	conn         *Conn
+	name         string
+	stream       uintptr               // from duckdb_arrow_array_scan
+	streamExport *abi.ArrowArrayStream // from duckdb_arrow_scan
+	schemaRaw    *abi.ArrowSchema
+	schemaRel    func(*abi.ArrowSchema)
+	arrayRaw     *abi.ArrowArray
+	arrayRel     func(*abi.ArrowArray)
+	closed       bool
+}
+
+type arrowStreamAdapter struct {
+	mu         sync.Mutex
+	provider   ArrowStreamProvider
+	schemaRaw  *abi.ArrowSchema
+	schemaRel  func(*abi.ArrowSchema)
+	rawStream  *abi.ArrowArrayStream
+	pinner     *runtime.Pinner
+	lastErrBuf []byte
+	lastErrPtr uintptr
+	errPinners []*runtime.Pinner
+	closed     bool
+}
+
+func (a *arrowStreamAdapter) setLastErrorLocked(msg string) {
+	if msg == "" {
+		msg = "arrow stream error"
+	}
+	cb, err := abi.CString(msg)
+	if err != nil {
+		cb = append([]byte(strings.ReplaceAll(msg, "\x00", "?")), 0)
+	}
+	p := new(runtime.Pinner)
+	p.Pin(&cb[0])
+	a.lastErrBuf = cb
+	a.lastErrPtr = uintptr(unsafe.Pointer(&cb[0]))
+	a.errPinners = append(a.errPinners, p)
+}
+
+func (a *arrowStreamAdapter) GetSchema(out *abi.ArrowSchema) int32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.schemaRaw == nil {
+		a.setLastErrorLocked("arrow stream closed")
+		return 22 // EINVAL
+	}
+	*out = *a.schemaRaw
+	// DuckDB's FactoryGetSchema clears out.release = NULL and never invokes it;
+	// schemaRaw remains owned by arrowStreamAdapter until Release.
+	out.Release = 0
+	return 0
+}
+
+func (a *arrowStreamAdapter) GetNext(out *abi.ArrowArray) int32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed {
+		*out = abi.ArrowArray{}
+		return 0
+	}
+	arr, err := a.provider.Next()
+	if err != nil {
+		*out = abi.ArrowArray{}
+		a.setLastErrorLocked(err.Error())
+		return 5 // EIO
+	}
+	if arr == nil {
+		*out = abi.ArrowArray{}
+		return 0
+	}
+	raw, _ := arr.takeOwnership()
+	if raw == nil {
+		*out = abi.ArrowArray{}
+		a.setLastErrorLocked("arrow stream provider returned released ArrowArray")
+		return 22 // EINVAL
+	}
+	// Transfer ownership of this batch's ArrowArray to DuckDB, which will
+	// invoke out.Release (our singleton ArrowArrayReleaseCallback) when done.
+	*out = *raw
+	return 0
+}
+
+func (a *arrowStreamAdapter) GetLastError() uintptr {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastErrPtr
+}
+
+func (a *arrowStreamAdapter) Release() {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return
+	}
+	a.closed = true
+	provider := a.provider
+	sRaw, sRel := a.schemaRaw, a.schemaRel
+	a.schemaRaw, a.schemaRel = nil, nil
+	pinner := a.pinner
+	errPinners := a.errPinners
+	a.errPinners = nil
+	a.lastErrBuf = nil
+	a.lastErrPtr = 0
+	a.mu.Unlock()
+
+	if provider != nil {
+		_ = provider.Close()
+	}
+	if sRaw != nil {
+		if sRel != nil {
+			sRel(sRaw)
+		} else {
+			abi.ReleaseArrowSchema(sRaw)
+		}
+	}
+	for _, ep := range errPinners {
+		ep.Unpin()
+	}
+	if pinner != nil {
+		pinner.Unpin()
+	}
+}
+
+// RegisterArrowStream registers a multi-batch ArrowStreamProvider as a
+// temporary SQL view named name on c via duckdb_arrow_scan. On success,
+// ownership of provider transfers to the returned ArrowView, which closes
+// provider and releases the schema when ArrowView.Close (or Conn.Close) runs.
+// On error, provider is NOT closed unless Schema() succeeded before an internal
+// error; callers should inspect err and close provider on error if needed.
+//
+// Note: DuckDB v1.5.6's deprecated duckdb_arrow_scan C API exhibits an upstream
+// projection-pushdown bug if a query skips leading columns (non-prefix column
+// projection). Queries against the view should select all columns (or a
+// contiguous leading prefix, e.g. CREATE TEMP TABLE t AS SELECT * FROM view);
+// for arbitrary SQL projections, prefer Appender.AppendArrowChunk /
+// duckdbarrow.AppendRecordReader.
+func (c *Conn) RegisterArrowStream(ctx context.Context, name string, provider ArrowStreamProvider) (*ArrowView, error) {
+	return c.registerArrowStreamWithTx(ctx, nil, name, provider)
+}
+
+// RegisterArrowStream registers a multi-batch ArrowStreamProvider as a
+// temporary SQL view within this transaction's connection.
+func (t *Tx) RegisterArrowStream(ctx context.Context, name string, provider ArrowStreamProvider) (*ArrowView, error) {
+	if t == nil {
+		return nil, ErrTxDone
+	}
+	return t.conn.registerArrowStreamWithTx(ctx, t, name, provider)
+}
+
+func (c *Conn) registerArrowStreamWithTx(ctx context.Context, tx *Tx, name string, provider ArrowStreamProvider) (*ArrowView, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if name == "" {
+		return nil, fmt.Errorf("%w: arrow view name must not be empty", ErrInvalidInput)
+	}
+	cname, err := abi.CString(name)
+	if err != nil {
+		return nil, fmt.Errorf("%w: arrow view name: %v", ErrInvalidInput, err)
+	}
+	if provider == nil {
+		return nil, fmt.Errorf("%w: nil ArrowStreamProvider", ErrInvalidInput)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
+	if err := c.usableLocked(); err != nil {
+		return nil, err
+	}
+
+	schema, err := provider.Schema()
+	if err != nil {
+		return nil, err
+	}
+	if schema == nil || schema.Released() {
+		return nil, fmt.Errorf("%w: ArrowStreamProvider returned nil or released schema", ErrInvalidInput)
+	}
+	sRaw, sRel := schema.takeOwnership()
+
+	rawStream := &abi.ArrowArrayStream{}
+	pinner := new(runtime.Pinner)
+	pinner.Pin(rawStream)
+	adapter := &arrowStreamAdapter{
+		provider:  provider,
+		schemaRaw: sRaw,
+		schemaRel: sRel,
+		rawStream: rawStream,
+		pinner:    pinner,
+	}
+	abi.RegisterExportedArrowStream(rawStream, adapter)
+
+	state := c.api.ArrowScan(c.handle, &cname[0], rawStream)
+	runtime.KeepAlive(cname)
+	if state != abi.StateSuccess {
+		// On registration failure, do not close caller's provider; only release
+		// our stream handle, pinned stream struct, and exported schema.
+		adapter.mu.Lock()
+		adapter.provider = nil
+		adapter.mu.Unlock()
+		abi.ReleaseArrowStream(rawStream)
+		return nil, nativeError("arrow_scan", abi.ErrorInvalid, fmt.Sprintf("register arrow stream view %q failed", name))
+	}
+
+	v := &ArrowView{
+		conn:         c,
+		name:         name,
+		streamExport: rawStream,
+	}
+	if c.arrowViews == nil {
+		c.arrowViews = make(map[*ArrowView]struct{})
+	}
+	c.arrowViews[v] = struct{}{}
+	return v, nil
 }
 
 // Name returns the SQL view name registered on the connection.
@@ -369,6 +593,11 @@ func (v *ArrowView) releaseLocked() {
 	}
 	if v.stream != 0 && v.conn != nil && v.conn.api != nil && v.conn.api.DestroyArrowStream != nil {
 		v.conn.api.DestroyArrowStream(&v.stream)
+	}
+	if v.streamExport != nil {
+		exp := v.streamExport
+		v.streamExport = nil
+		abi.ReleaseArrowStream(exp)
 	}
 	if v.arrayRaw != nil {
 		raw, rel := v.arrayRaw, v.arrayRel

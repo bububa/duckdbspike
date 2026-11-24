@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -144,6 +146,8 @@ func exportDataTypeSpec(dt arrow.DataType, depth int) (duckdb.ArrowSchemaSpec, e
 		return duckdb.ArrowSchemaSpec{Format: "I"}, nil
 	case *arrow.Uint64Type:
 		return duckdb.ArrowSchemaSpec{Format: "L"}, nil
+	case *arrow.Float16Type:
+		return duckdb.ArrowSchemaSpec{Format: "e"}, nil
 	case *arrow.Float32Type:
 		return duckdb.ArrowSchemaSpec{Format: "f"}, nil
 	case *arrow.Float64Type:
@@ -209,6 +213,23 @@ func exportDataTypeSpec(dt arrow.DataType, depth int) (duckdb.ArrowSchemaSpec, e
 		return duckdb.ArrowSchemaSpec{Format: "tiD"}, nil
 	case *arrow.MonthDayNanoIntervalType:
 		return duckdb.ArrowSchemaSpec{Format: "tin"}, nil
+	case *arrow.DurationType:
+		switch t.Unit {
+		case arrow.Second:
+			return duckdb.ArrowSchemaSpec{Format: "tDs"}, nil
+		case arrow.Millisecond:
+			return duckdb.ArrowSchemaSpec{Format: "tDm"}, nil
+		case arrow.Microsecond:
+			return duckdb.ArrowSchemaSpec{Format: "tDu"}, nil
+		case arrow.Nanosecond:
+			return duckdb.ArrowSchemaSpec{Format: "tDn"}, nil
+		default:
+			return duckdb.ArrowSchemaSpec{}, fmt.Errorf("%w: unsupported duration unit %v", duckdb.ErrUnsupportedType, t.Unit)
+		}
+	case *arrow.DenseUnionType:
+		return exportUnionSchemaSpec("+ud:", t.Fields(), t.TypeCodes(), depth)
+	case *arrow.SparseUnionType:
+		return exportUnionSchemaSpec("+us:", t.Fields(), t.TypeCodes(), depth)
 	case *arrow.DictionaryType:
 		idxSpec, err := exportDataTypeSpec(t.IndexType, depth+1)
 		if err != nil {
@@ -454,6 +475,43 @@ func exportArrayDataSpec(data arrow.ArrayData, depth int) (duckdb.ArrowArraySpec
 		spec.Children = children
 		return spec, nil
 
+	case *arrow.DenseUnionType:
+		kids := data.Children()
+		children := make([]duckdb.ArrowArraySpec, len(kids))
+		for i, k := range kids {
+			cs, err := exportArrayDataSpec(k, depth+1)
+			if err != nil {
+				return duckdb.ArrowArraySpec{}, fmt.Errorf("dense union child %d: %w", i, err)
+			}
+			children[i] = cs
+		}
+		// arrow-go stores [nil, typeIDs, offsets]; C Data Interface expects [typeIDs, offsets].
+		spec.NullCount = 0
+		spec.Buffers = [][]byte{
+			getBuf(1, true),
+			getBuf(2, true),
+		}
+		spec.Children = children
+		return spec, nil
+
+	case *arrow.SparseUnionType:
+		kids := data.Children()
+		children := make([]duckdb.ArrowArraySpec, len(kids))
+		for i, k := range kids {
+			cs, err := exportArrayDataSpec(k, depth+1)
+			if err != nil {
+				return duckdb.ArrowArraySpec{}, fmt.Errorf("sparse union child %d: %w", i, err)
+			}
+			children[i] = cs
+		}
+		// arrow-go stores [nil, typeIDs]; C Data Interface expects [typeIDs].
+		spec.NullCount = 0
+		spec.Buffers = [][]byte{
+			getBuf(1, true),
+		}
+		spec.Children = children
+		return spec, nil
+
 	default:
 		return duckdb.ArrowArraySpec{}, fmt.Errorf("%w: unsupported Arrow data type %s", duckdb.ErrUnsupportedType, dt)
 	}
@@ -539,6 +597,81 @@ func RegisterRecordBatch(ctx context.Context, conn *duckdb.Conn, viewName string
 	if err != nil {
 		arr.Release()
 		schema.Release()
+		return nil, err
+	}
+	return view, nil
+}
+
+func exportUnionSchemaSpec(prefix string, fields []arrow.Field, codes []arrow.UnionTypeCode, depth int) (duckdb.ArrowSchemaSpec, error) {
+	if len(fields) != len(codes) {
+		return duckdb.ArrowSchemaSpec{}, fmt.Errorf("%w: union fields (%d) != type codes (%d)", duckdb.ErrInvalidInput, len(fields), len(codes))
+	}
+	codeStrs := make([]string, len(codes))
+	children := make([]duckdb.ArrowSchemaSpec, len(fields))
+	for i, f := range fields {
+		codeStrs[i] = strconv.Itoa(int(codes[i]))
+		cs, err := exportFieldSpec(f, depth+1)
+		if err != nil {
+			return duckdb.ArrowSchemaSpec{}, fmt.Errorf("union member %d (%q): %w", i, f.Name, err)
+		}
+		children[i] = cs
+	}
+	return duckdb.ArrowSchemaSpec{
+		Format:   prefix + strings.Join(codeStrs, ","),
+		Children: children,
+	}, nil
+}
+
+type recordReaderStreamProvider struct {
+	reader array.RecordReader
+	closed bool
+}
+
+func (p *recordReaderStreamProvider) Schema() (*duckdb.ArrowSchema, error) {
+	return ExportSchema(p.reader.Schema())
+}
+
+func (p *recordReaderStreamProvider) Next() (*duckdb.ArrowArray, error) {
+	for p.reader.Next() {
+		rec := p.reader.RecordBatch()
+		if rec == nil || rec.NumRows() == 0 {
+			continue
+		}
+		return ExportRecordBatch(rec)
+	}
+	if err := p.reader.Err(); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+func (p *recordReaderStreamProvider) Close() error {
+	if !p.closed {
+		p.closed = true
+		p.reader.Release()
+	}
+	return nil
+}
+
+// RegisterRecordReader registers a multi-batch array.RecordReader as a
+// streaming temporary DuckDB SQL view named viewName via
+// Conn.RegisterArrowStream (duckdb_arrow_scan). Batches are pulled lazily as
+// DuckDB scans the view without materializing the stream into a single batch.
+// RegisterRecordReader retains reader and releases it when ArrowView.Close
+// (or Conn.Close) runs. See Conn.RegisterArrowStream for DuckDB v1.5.6
+// projection-pushdown caveats; for arbitrary column projections, prefer
+// AppendRecordReader into a temporary table.
+func RegisterRecordReader(ctx context.Context, conn *duckdb.Conn, viewName string, reader array.RecordReader) (*duckdb.ArrowView, error) {
+	if conn == nil {
+		return nil, duckdb.ErrClosed
+	}
+	if reader == nil {
+		return nil, fmt.Errorf("%w: nil Arrow RecordReader", duckdb.ErrInvalidInput)
+	}
+	reader.Retain()
+	view, err := conn.RegisterArrowStream(ctx, viewName, &recordReaderStreamProvider{reader: reader})
+	if err != nil {
+		reader.Release()
 		return nil, err
 	}
 	return view, nil

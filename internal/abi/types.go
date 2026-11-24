@@ -124,6 +124,17 @@ type ArrowArray struct {
 	PrivateData uintptr
 }
 
+// ArrowArrayStream mirrors struct ArrowArrayStream from the Apache Arrow C
+// Stream Interface. It contains no Go pointers; function pointer fields point
+// to process-wide singleton purego callbacks dispatching via PrivateData.
+type ArrowArrayStream struct {
+	GetSchema    uintptr
+	GetNext      uintptr
+	GetLastError uintptr
+	Release      uintptr
+	PrivateData  uintptr
+}
+
 // Blob mirrors struct duckdb_blob.
 type Blob struct {
 	Data uintptr

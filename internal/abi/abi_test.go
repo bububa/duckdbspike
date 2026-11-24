@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"unsafe"
+
+	"github.com/ebitengine/purego"
 )
 
 func TestSymbolsCoverEveryAPIField(t *testing.T) {
@@ -434,5 +436,91 @@ func TestSingletonArrowReleaseCallbacks(t *testing.T) {
 	}
 	if got := ExportedArrowHandleCount(); got != before {
 		t.Fatalf("leaked exported arrow handles: got %d, want %d", got, before)
+	}
+}
+
+type fakeStreamHandler struct {
+	schemaCalls int
+	nextCalls   int
+	released    int
+	errBytes    []byte
+}
+
+func (h *fakeStreamHandler) GetSchema(out *ArrowSchema) int32 {
+	h.schemaCalls++
+	out.Flags = 7
+	return 0
+}
+
+func (h *fakeStreamHandler) GetNext(out *ArrowArray) int32 {
+	h.nextCalls++
+	if h.nextCalls == 1 {
+		out.Length = 42
+		return 0
+	}
+	return 5 // EIO
+}
+
+func (h *fakeStreamHandler) GetLastError() uintptr {
+	return uintptr(unsafe.Pointer(&h.errBytes[0]))
+}
+
+func (h *fakeStreamHandler) Release() {
+	h.released++
+}
+
+func TestSingletonArrowStreamCallbacks(t *testing.T) {
+	if sz := unsafe.Sizeof(ArrowArrayStream{}); sz != 5*unsafe.Sizeof(uintptr(0)) {
+		t.Fatalf("sizeof(ArrowArrayStream) = %d, want %d", sz, 5*unsafe.Sizeof(uintptr(0)))
+	}
+	before := ExportedArrowHandleCount()
+
+	errMsg, _ := CString("stream io error")
+	h := &fakeStreamHandler{errBytes: errMsg}
+	raw := &ArrowArrayStream{}
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	pinner.Pin(raw)
+	pinner.Pin(&errMsg[0])
+
+	RegisterExportedArrowStream(raw, h)
+	if got := ExportedArrowHandleCount(); got != before+1 {
+		t.Fatalf("handle count = %d, want %d", got, before+1)
+	}
+
+	// Simulate DuckDB shallow-copying ArrowArrayStream before calling callbacks.
+	copied := *raw
+	pinner.Pin(&copied)
+
+	var outS ArrowSchema
+	pinner.Pin(&outS)
+	r1, _, _ := purego.SyscallN(copied.GetSchema, uintptr(unsafe.Pointer(&copied)), uintptr(unsafe.Pointer(&outS)))
+	if r1 != 0 || outS.Flags != 7 || h.schemaCalls != 1 {
+		t.Fatalf("GetSchema failed: rc=%d flags=%d calls=%d", r1, outS.Flags, h.schemaCalls)
+	}
+
+	var outA ArrowArray
+	pinner.Pin(&outA)
+	r2, _, _ := purego.SyscallN(copied.GetNext, uintptr(unsafe.Pointer(&copied)), uintptr(unsafe.Pointer(&outA)))
+	if r2 != 0 || outA.Length != 42 {
+		t.Fatalf("GetNext #1 failed: rc=%d len=%d", r2, outA.Length)
+	}
+
+	r3, _, _ := purego.SyscallN(copied.GetNext, uintptr(unsafe.Pointer(&copied)), uintptr(unsafe.Pointer(&outA)))
+	if int32(r3) != 5 {
+		t.Fatalf("GetNext #2 rc = %d, want 5", int32(r3))
+	}
+	rErr, _, _ := purego.SyscallN(copied.GetLastError, uintptr(unsafe.Pointer(&copied)))
+	if got := GoString(rErr); got != "stream io error" {
+		t.Fatalf("GetLastError = %q, want %q", got, "stream io error")
+	}
+
+	ReleaseArrowStream(raw)
+	ReleaseArrowStream(raw) // idempotent
+	if h.released != 1 || raw.Release != 0 {
+		t.Fatalf("Release failed: released=%d raw.Release=%x", h.released, raw.Release)
+	}
+	if got := ExportedArrowHandleCount(); got != before {
+		t.Fatalf("leaked handles: got %d, want %d", got, before)
 	}
 }

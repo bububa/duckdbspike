@@ -14,10 +14,26 @@ var (
 	arrayReleaseOnce sync.Once
 	arrayReleaseCB   uintptr
 
+	streamCBOnce         sync.Once
+	streamGetSchemaCB    uintptr
+	streamGetNextCB      uintptr
+	streamGetLastErrorCB uintptr
+	streamReleaseCB      uintptr
+
 	exportedArrowSeq     atomic.Uintptr
 	exportedArrowCount   atomic.Int64
 	exportedArrowHandles sync.Map // map[uintptr]func()
+	exportedArrowStreams sync.Map // map[uintptr]ArrowStreamHandler
 )
+
+// ArrowStreamHandler implements the Go side of an exported ArrowArrayStream
+// dispatched by the 4 process-wide singleton C stream callbacks.
+type ArrowStreamHandler interface {
+	GetSchema(out *ArrowSchema) int32
+	GetNext(out *ArrowArray) int32
+	GetLastError() uintptr
+	Release()
+}
 
 func nextExportedArrowID() uintptr {
 	for {
@@ -134,7 +150,82 @@ func MarkArrowArrayChildRelease(raw *ArrowArray) {
 }
 
 // ExportedArrowHandleCount returns the number of currently live exported Arrow
-// schemas and arrays awaiting release. Intended for leak detection in tests.
+// schemas, arrays, and streams awaiting release. Intended for leak detection in
+// tests.
 func ExportedArrowHandleCount() int64 {
 	return exportedArrowCount.Load()
+}
+
+func ensureArrowStreamCallbacks() {
+	streamCBOnce.Do(func() {
+		streamGetSchemaCB = purego.NewCallback(func(_ purego.CDecl, streamPtr, outSchemaPtr uintptr) uintptr {
+			if streamPtr == 0 || outSchemaPtr == 0 {
+				return 22 // EINVAL
+			}
+			s := (*ArrowArrayStream)(Pointer(streamPtr))
+			v, ok := exportedArrowStreams.Load(s.PrivateData)
+			if !ok {
+				return 22 // EINVAL
+			}
+			code := v.(ArrowStreamHandler).GetSchema((*ArrowSchema)(Pointer(outSchemaPtr)))
+			return uintptr(uint32(code))
+		})
+		streamGetNextCB = purego.NewCallback(func(_ purego.CDecl, streamPtr, outArrayPtr uintptr) uintptr {
+			if streamPtr == 0 || outArrayPtr == 0 {
+				return 22 // EINVAL
+			}
+			s := (*ArrowArrayStream)(Pointer(streamPtr))
+			v, ok := exportedArrowStreams.Load(s.PrivateData)
+			if !ok {
+				return 22 // EINVAL
+			}
+			code := v.(ArrowStreamHandler).GetNext((*ArrowArray)(Pointer(outArrayPtr)))
+			return uintptr(uint32(code))
+		})
+		streamGetLastErrorCB = purego.NewCallback(func(_ purego.CDecl, streamPtr uintptr) uintptr {
+			if streamPtr == 0 {
+				return 0
+			}
+			s := (*ArrowArrayStream)(Pointer(streamPtr))
+			v, ok := exportedArrowStreams.Load(s.PrivateData)
+			if !ok {
+				return 0
+			}
+			return v.(ArrowStreamHandler).GetLastError()
+		})
+		streamReleaseCB = purego.NewCallback(func(_ purego.CDecl, streamPtr uintptr) uintptr {
+			if streamPtr == 0 {
+				return 0
+			}
+			s := (*ArrowArrayStream)(Pointer(streamPtr))
+			id := s.PrivateData
+			s.Release = 0
+			s.PrivateData = 0
+			if id != 0 {
+				if v, ok := exportedArrowStreams.LoadAndDelete(id); ok {
+					exportedArrowCount.Add(-1)
+					v.(ArrowStreamHandler).Release()
+				}
+			}
+			return 0
+		})
+	})
+}
+
+// RegisterExportedArrowStream attaches the 4 process-wide singleton C stream
+// callbacks to raw and registers handler until Release executes. Callers must
+// keep raw pinned until handler.Release runs.
+func RegisterExportedArrowStream(raw *ArrowArrayStream, handler ArrowStreamHandler) {
+	if raw == nil || handler == nil {
+		return
+	}
+	ensureArrowStreamCallbacks()
+	id := nextExportedArrowID()
+	exportedArrowStreams.Store(id, handler)
+	exportedArrowCount.Add(1)
+	raw.GetSchema = streamGetSchemaCB
+	raw.GetNext = streamGetNextCB
+	raw.GetLastError = streamGetLastErrorCB
+	raw.Release = streamReleaseCB
+	raw.PrivateData = id
 }

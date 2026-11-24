@@ -351,10 +351,14 @@ type API struct {
 	SchemaFromArrow             func(connection uintptr, schema *ArrowSchema, outConverted *uintptr) uintptr
 	DataChunkFromArrow          func(connection uintptr, array *ArrowArray, converted uintptr, outChunk *uintptr) uintptr
 	DestroyArrowConvertedSchema func(converted *uintptr)
+	// ArrowScan registers a temporary Arrow view backed by a borrowed
+	// ArrowArrayStream; DuckDB does not invoke stream.Release, so callers must
+	// drop the view and release the stream via ReleaseArrowStream.
 	// ArrowArrayScan registers a single-use temporary Arrow view backed by
 	// arrowSchema and arrowArray and allocates an owned duckdb_arrow_stream
 	// released by DestroyArrowStream. DuckDB borrows arrowSchema and arrowArray
 	// until the view is dropped and the stream is destroyed.
+	ArrowScan          func(connection uintptr, tableName *byte, stream *ArrowArrayStream) int32
 	ArrowArrayScan     func(connection uintptr, tableName *byte, arrowSchema *ArrowSchema, arrowArray *ArrowArray, outStream *uintptr) int32
 	DestroyArrowStream func(stream *uintptr)
 }
@@ -617,6 +621,7 @@ func (a *API) symbols() []symbol {
 		{&a.SchemaFromArrow, "duckdb_schema_from_arrow"},
 		{&a.DataChunkFromArrow, "duckdb_data_chunk_from_arrow"},
 		{&a.DestroyArrowConvertedSchema, "duckdb_destroy_arrow_converted_schema"},
+		{&a.ArrowScan, "duckdb_arrow_scan"},
 		{&a.ArrowArrayScan, "duckdb_arrow_array_scan"},
 		{&a.DestroyArrowStream, "duckdb_destroy_arrow_stream"},
 	}

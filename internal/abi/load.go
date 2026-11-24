@@ -211,3 +211,14 @@ func ReleaseArrowArray(a *ArrowArray) {
 	purego.SyscallN(fn, uintptr(unsafe.Pointer(a)))
 	a.Release = 0
 }
+
+// ReleaseArrowStream invokes the C release callback of an ArrowArrayStream and
+// clears its Release pointer. Safe to call on nil or already-released streams.
+func ReleaseArrowStream(s *ArrowArrayStream) {
+	if s == nil || s.Release == 0 {
+		return
+	}
+	fn := s.Release
+	purego.SyscallN(fn, uintptr(unsafe.Pointer(s)))
+	s.Release = 0
+}

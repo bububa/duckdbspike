@@ -160,6 +160,8 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 		return arrow.PrimitiveTypes.Uint32, nil
 	case "L":
 		return arrow.PrimitiveTypes.Uint64, nil
+	case "e":
+		return arrow.FixedWidthTypes.Float16, nil
 	case "f":
 		return arrow.PrimitiveTypes.Float32, nil
 	case "g":
@@ -194,6 +196,14 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 		return arrow.FixedWidthTypes.DayTimeInterval, nil
 	case "tin":
 		return arrow.FixedWidthTypes.MonthDayNanoInterval, nil
+	case "tDs":
+		return arrow.FixedWidthTypes.Duration_s, nil
+	case "tDm":
+		return arrow.FixedWidthTypes.Duration_ms, nil
+	case "tDu":
+		return arrow.FixedWidthTypes.Duration_us, nil
+	case "tDn":
+		return arrow.FixedWidthTypes.Duration_ns, nil
 	case "+l":
 		if v.ChildCount() != 1 {
 			return nil, fmt.Errorf("%w: list schema expects 1 child, got %d", duckdb.ErrInvalidInput, v.ChildCount())
@@ -306,6 +316,35 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 			return nil, fmt.Errorf("%w: unsupported timestamp format %q", duckdb.ErrUnsupportedType, format)
 		}
 		return &arrow.TimestampType{Unit: unit, TimeZone: tz}, nil
+	case strings.HasPrefix(format, "+ud:"), strings.HasPrefix(format, "+us:"):
+		dense := format[2] == 'd'
+		rawCodes := format[4:]
+		n := v.ChildCount()
+		var codeParts []string
+		if rawCodes != "" {
+			codeParts = strings.Split(rawCodes, ",")
+		}
+		if len(codeParts) != n {
+			return nil, fmt.Errorf("%w: union format %q has %d codes for %d children", duckdb.ErrInvalidInput, format, len(codeParts), n)
+		}
+		codes := make([]arrow.UnionTypeCode, n)
+		fields := make([]arrow.Field, n)
+		for i := 0; i < n; i++ {
+			c, err := strconv.ParseInt(codeParts[i], 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("%w: invalid union type code %q in %q", duckdb.ErrInvalidInput, codeParts[i], format)
+			}
+			codes[i] = arrow.UnionTypeCode(c)
+			f, err := importField(v.Child(i), depth+1)
+			if err != nil {
+				return nil, err
+			}
+			fields[i] = f
+		}
+		if dense {
+			return arrow.DenseUnionOf(fields, codes), nil
+		}
+		return arrow.SparseUnionOf(fields, codes), nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported Arrow format %q", duckdb.ErrUnsupportedType, format)
 	}
@@ -594,6 +633,53 @@ func importArrayData(dt arrow.DataType, v duckdb.ArrowArrayView, alloc memory.Al
 		}
 		children := []arrow.ArrayData{childData}
 		data := array.NewData(dt, length, bufs, children, nulls, offset)
+		releaseBuffers(bufs)
+		releaseChildren(children)
+		return data, nil
+
+	case *arrow.DenseUnionType:
+		if v.BufferCount() < 2 || v.ChildCount() != len(t.Fields()) {
+			return nil, fmt.Errorf("%w: dense union array invalid buffers/children", duckdb.ErrInvalidInput)
+		}
+		children := make([]arrow.ArrayData, len(t.Fields()))
+		for i, f := range t.Fields() {
+			cd, err := importArrayData(f.Type, v.Child(i), alloc, depth+1)
+			if err != nil {
+				releaseChildren(children)
+				return nil, err
+			}
+			children[i] = cd
+		}
+		// arrow-go expects [nil, typeIDs, offsets] for DenseUnion ArrayData.
+		bufs := []*memory.Buffer{
+			nil,
+			copyBuffer(alloc, v.Buffer(0), total),
+			copyBuffer(alloc, v.Buffer(1), total*4),
+		}
+		data := array.NewData(dt, length, bufs, children, 0, offset)
+		releaseBuffers(bufs)
+		releaseChildren(children)
+		return data, nil
+
+	case *arrow.SparseUnionType:
+		if v.BufferCount() < 1 || v.ChildCount() != len(t.Fields()) {
+			return nil, fmt.Errorf("%w: sparse union array invalid buffers/children", duckdb.ErrInvalidInput)
+		}
+		children := make([]arrow.ArrayData, len(t.Fields()))
+		for i, f := range t.Fields() {
+			cd, err := importArrayData(f.Type, v.Child(i), alloc, depth+1)
+			if err != nil {
+				releaseChildren(children)
+				return nil, err
+			}
+			children[i] = cd
+		}
+		// arrow-go expects [nil, typeIDs] for SparseUnion ArrayData.
+		bufs := []*memory.Buffer{
+			nil,
+			copyBuffer(alloc, v.Buffer(0), total),
+		}
+		data := array.NewData(dt, length, bufs, children, 0, offset)
 		releaseBuffers(bufs)
 		releaseChildren(children)
 		return data, nil
