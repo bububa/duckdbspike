@@ -11,7 +11,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP4bVFSFileAndCatalogMockZeroLeaks(t *testing.T) {
+func TestVFSFileAndCatalogMockZeroLeaks(t *testing.T) {
 	var (
 		clientCtxAlive int
 		fsAlive        int

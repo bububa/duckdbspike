@@ -8,7 +8,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP2bMetadataAPIs(t *testing.T) {
+func TestNativeMetadataAPIs(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 

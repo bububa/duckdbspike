@@ -9,7 +9,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP4cChunkBufferedAppenderMockAutoFlushRollbackAndZeroLeaks(t *testing.T) {
+func TestChunkBufferedAppenderMockAutoFlushRollbackAndZeroLeaks(t *testing.T) {
 	const capRows = 2
 	var (
 		chunksAlive      int

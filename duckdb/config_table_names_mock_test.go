@@ -11,7 +11,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP3aTypeHelpersAndValueAs(t *testing.T) {
+func TestTypeHelpersAndValueAs(t *testing.T) {
 	// Date helpers.
 	tm := time.Date(2026, 11, 24, 15, 30, 0, 0, time.UTC)
 	d, err := DateFromTime(tm)
@@ -102,7 +102,7 @@ func TestP3aTypeHelpersAndValueAs(t *testing.T) {
 	}
 }
 
-func TestP3aContextMetadataAndTableNamesMockZeroLeaks(t *testing.T) {
+func TestContextMetadataAndTableNamesMockZeroLeaks(t *testing.T) {
 	var (
 		cStrings      [][]byte
 		liveCtx       int

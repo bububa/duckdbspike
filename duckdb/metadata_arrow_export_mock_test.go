@@ -11,7 +11,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP2bMetadataMockZeroLeaks(t *testing.T) {
+func TestMetadataMockZeroLeaks(t *testing.T) {
 	var (
 		cStrings      [][]byte
 		liveLogTypes  int
@@ -172,7 +172,7 @@ func TestP2bMetadataMockZeroLeaks(t *testing.T) {
 	}
 }
 
-func TestP2bArrowExportAndViewMockZeroLeaks(t *testing.T) {
+func TestArrowExportAndViewMockZeroLeaks(t *testing.T) {
 	before := abi.ExportedArrowHandleCount()
 
 	// Encode Arrow C Data Interface metadata with 1 pair: ARROW:extension:name = arrow.uuid.

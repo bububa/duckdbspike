@@ -8,7 +8,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP4aMultiResultSetAndScriptParamDistribution(t *testing.T) {
+func TestNativeMultiResultSetAndScriptParamDistribution(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})

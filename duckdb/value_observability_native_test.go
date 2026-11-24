@@ -12,7 +12,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP0TypesRoundTrip(t *testing.T) {
+func TestNativeExtendedScalarTypesRoundTrip(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})

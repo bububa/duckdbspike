@@ -9,7 +9,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP3cVariantSchemaValidationZeroLeaks(t *testing.T) {
+func TestVariantSchemaValidationZeroLeaks(t *testing.T) {
 	runCase := func(name string, childCount uint64, childNames [4]string, dataType int32, wantErr bool) {
 		t.Helper()
 		t.Run(name, func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestP3cVariantSchemaValidationZeroLeaks(t *testing.T) {
 	runCase("wrong_data_type", 4, [4]string{"keys", "children", "values", "data"}, abi.TypeVarchar, true)
 }
 
-func TestP3cVariantDecoderBoundsCycleAndLimitsMock(t *testing.T) {
+func TestVariantDecoderBoundsCycleAndLimitsMock(t *testing.T) {
 	// Helper to build a synthetic in-memory VARIANT row decoder directly.
 	makeDec := func(types []uint8, offsets []uint32, childVals []uint32, data []byte, limits DecodeLimits) *variantRowDecoder {
 		var tPtr, oPtr, cvPtr uintptr

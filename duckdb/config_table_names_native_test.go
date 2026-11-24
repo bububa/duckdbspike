@@ -8,7 +8,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP3aScriptsTableNamesConnectionIDAndConfigOption(t *testing.T) {
+func TestNativeScriptsTableNamesConnectionIDAndConfigOption(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 

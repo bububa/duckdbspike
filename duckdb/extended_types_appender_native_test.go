@@ -9,7 +9,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP2aTypesUnionBitBignumGeometryAndInfinity(t *testing.T) {
+func TestNativeUnionBitBignumGeometryAndInfinity(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})

@@ -13,7 +13,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdbsql"
 )
 
-func TestNativeP3aDBInitMultiStmtAndErgonomicBinders(t *testing.T) {
+func TestNativeDBInitMultiStmtAndErgonomicBinders(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 

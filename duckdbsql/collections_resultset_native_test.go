@@ -10,7 +10,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdbsql"
 )
 
-func TestNativeP4aMapArrayBindingsEnumValuerAndNextResultSet(t *testing.T) {
+func TestNativeMapArrayBindingsEnumValuerAndNextResultSet(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 

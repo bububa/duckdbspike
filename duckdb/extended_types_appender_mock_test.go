@@ -10,7 +10,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP2aTypesInfinityErrorKindsAndLayout(t *testing.T) {
+func TestTypesInfinityErrorKindsAndLayout(t *testing.T) {
 	if sz := unsafe.Sizeof(Value{}); sz > 48 {
 		t.Fatalf("sizeof(Value) = %d bytes, want <= 48", sz)
 	}

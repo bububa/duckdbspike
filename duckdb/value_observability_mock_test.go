@@ -17,7 +17,7 @@ func TestValueCompactLayoutSize(t *testing.T) {
 	}
 }
 
-func TestP0ScalarTypesValidationAndAccessors(t *testing.T) {
+func TestScalarTypesValidationAndAccessors(t *testing.T) {
 	// UUID parsing, canonical lowercase formatting, and Value round-trip.
 	u, err := ParseUUID("01234567-89AB-CDEF-0123-456789abcdef")
 	if err != nil {
@@ -174,7 +174,7 @@ func TestCompositeValueConstructorsValidationAndIsolation(t *testing.T) {
 	}
 }
 
-func TestP0ZeroLeaksOnBindDecodeAndNamedParamErrors(t *testing.T) {
+func TestZeroLeaksOnBindDecodeAndNamedParamErrors(t *testing.T) {
 	ctx := context.Background()
 
 	// Enum dictionary exceeding MaxValueBytes frees every dictionary string and logical type.

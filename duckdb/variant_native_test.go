@@ -11,7 +11,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdbsql"
 )
 
-func TestNativeP3cVariantAllTypesNullDistinctionAndTableShredding(t *testing.T) {
+func TestNativeVariantAllTypesNullDistinctionAndTableShredding(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 
@@ -328,7 +328,7 @@ func TestNativeP3cVariantAllTypesNullDistinctionAndTableShredding(t *testing.T) 
 	// Note: DuckDB v1.5.6 normalizes top-level NULL::VARIANT and variant_extract of a
 	// NULL field to outer SQL NULL (IS NULL = true), while preserving VARIANT_NULL
 	// (type_id = 0) inside OBJECT/ARRAY payloads (root-level VARIANT_NULL with valid
-	// outer bit is also covered in TestP3cVariantDecoderBoundsCycleAndLimitsMock).
+	// outer bit is also covered in TestVariantDecoderBoundsCycleAndLimitsMock).
 	nRows, err := conn.Query(ctx, `SELECT
 		NULL::VARIANT,
 		[NULL::INTEGER, 99::INTEGER]::VARIANT,

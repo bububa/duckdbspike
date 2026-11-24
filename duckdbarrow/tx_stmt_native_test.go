@@ -12,7 +12,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdbarrow"
 )
 
-func TestNativeP4bArrowTxStmtAndScriptHelpers(t *testing.T) {
+func TestNativeArrowTxStmtAndScriptHelpers(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})

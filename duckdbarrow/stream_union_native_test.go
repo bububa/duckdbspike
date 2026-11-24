@@ -13,7 +13,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdbarrow"
 )
 
-func TestP3bArrowUnionFloat16DurationRoundTripPureGo(t *testing.T) {
+func TestArrowUnionFloat16DurationRoundTripPureGo(t *testing.T) {
 	alloc := memory.NewCheckedAllocator(memory.DefaultAllocator)
 	defer alloc.AssertSize(t, 0)
 
@@ -126,7 +126,7 @@ func TestP3bArrowUnionFloat16DurationRoundTripPureGo(t *testing.T) {
 	}
 }
 
-func TestNativeP3bDuckDBUnionQueryAndStreamingRegisterRecordReader(t *testing.T) {
+func TestNativeDuckDBUnionQueryAndStreamingRegisterRecordReader(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 

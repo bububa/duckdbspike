@@ -9,7 +9,7 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-func TestP4aMultiResultSetMockZeroLeaksAndEarlyClose(t *testing.T) {
+func TestMultiResultSetMockZeroLeaksAndEarlyClose(t *testing.T) {
 	var (
 		extractedAlive int
 		stmtAlive      int

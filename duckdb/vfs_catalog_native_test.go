@@ -9,7 +9,7 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-func TestNativeP4bVFSFileCatalogStmtArrowSchemaAndQueryScriptArrow(t *testing.T) {
+func TestNativeVFSFileCatalogStmtArrowSchemaAndQueryScriptArrow(t *testing.T) {
 	lib := loadNativeLibrary(t)
 	ctx := context.Background()
 	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})
