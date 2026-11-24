@@ -7,7 +7,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for repo layout, architecture, build/test c
 
 - **No cgo in production**: Never add `import "C"`. All production code must build with `CGO_ENABLED=0` (only the test-only C layout probe in `internal/abi/abi_test.go` may invoke `cc`).
 - **No unverified platforms**: Do not widen build tags in `internal/abi/platform_accepted.go` without a real-native acceptance run and an updated artifact/SHA-256 entry in `README.md`.
-- **No extra dependencies**: Keep `github.com/ebitengine/purego` as the sole external dependency unless explicitly asked otherwise.
+- **No extra dependencies**: Keep direct external dependencies restricted to `github.com/ebitengine/purego` (core) and `github.com/apache/arrow-go/v18` (`duckdbarrow`) unless explicitly asked otherwise.
 - **No non-streaming `Query`**: Never switch `Query` away from `duckdb_pending_prepared_streaming` or remove the `duckdb_result_is_streaming == true` assertion.
 - **No library unload**: Never call `dlclose` on mapped native libraries.
 - **No lossy type conversions**: Never pass bound or decoded SQL values through `float64`, string, or JSON intermediates. Reject unsupported logical types during prepare/result inspection even when all rows are `NULL` or the result is empty.
@@ -30,7 +30,7 @@ See [DEVELOPMENT.md](DEVELOPMENT.md) for repo layout, architecture, build/test c
 
 ## Testing & Verification Rules
 
-- **Mock first, native paired**: Add deterministic mock tests (using fake `abi.API` literals) for lifecycle, error, budget, and race edge cases so CI (`ubuntu-latest`, no `libduckdb`) covers them; pair native behavior changes with `*_native_test.go` tests.
+- **Mock first, native paired**: Add deterministic mock tests (using fake `abi.API` literals) for lifecycle, error, budget, and race edge cases so CI (`ubuntu-latest`, no `libduckdb`) covers them; pair native behavior changes with `*_native_test.go` tests. Use descriptive domain-based test filenames and test function names (never include internal plan phase prefixes such as `p0_` or `TestP1a...`).
 - **Required checks before finishing**:
   - Run `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go vet ./...`, and `CGO_ENABLED=0 go test -count=1 ./...`.
   - When changing ABI, loader, cancellation, budget, session, or `PinnedVersion`, also run the full real-native + `-race` matrix documented in [DEVELOPMENT.md](DEVELOPMENT.md).

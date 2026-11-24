@@ -3,11 +3,67 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/bububa/duckdbspike.svg)](https://pkg.go.dev/github.com/bububa/duckdbspike)
 [![Go](https://github.com/bububa/duckdbspike/actions/workflows/go.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/go.yml)
 [![goreleaser](https://github.com/bububa/duckdbspike/actions/workflows/goreleaser.yml/badge.svg)](https://github.com/bububa/duckdbspike/actions/workflows/goreleaser.yml)
-[![GitHub go.mod Go version of a Go module](https://img.shields.io/github/go-mod/go-version/bububa/atomic-agents.svg)](https://github.com/bububa/atomic-agents)
+[![GitHub go.mod Go version of a Go module](https://img.shields.io/github/go-mod/go-version/bububa/duckdbspike.svg)](https://github.com/bububa/duckdbspike)
 [![GitHub license](https://img.shields.io/github/license/bububa/duckdbspike.svg)](https://github.com/bububa/duckdbspike/blob/master/LICENSE)
-[![GitHub release](https://img.shields.io/github/release/bububa/duckdbspike.svg)](https://GitHub.com/bububa/duckdbspike/releases/)
+[![GitHub release](https://img.shields.io/github/release/bububa/duckdbspike.svg)](https://github.com/bububa/duckdbspike/releases/)
 
-> Minimal, `CGO_ENABLED=0` purego binding for a single pinned DuckDB native C API release, designed for read-only telemetry reporting.
+> Pure-Go (`CGO_ENABLED=0`) [`purego`](https://github.com/ebitengine/purego) binding for DuckDB `v1.5.6` with streaming-only queries, cooperative cancellation, exact SQL types (including `VARIANT`), chunk-buffered bulk `Appender`, `database/sql` driver, and `CGO_ENABLED=0` Apache Arrow integration.
+
+See **[USAGE.md](USAGE.md)** for complete code examples and **[DEVELOPMENT.md](DEVELOPMENT.md)** for architecture, testing, and upgrade workflows.
+
+---
+
+## Packages & Dependencies
+
+| Package | Purpose | External Dependencies |
+| :--- | :--- | :--- |
+| `duckdb` | Core engine API: verified `Load`, `Database`, `InstanceCache`, `Conn`, `Tx`, `Stmt`, streaming `Rows`, multi-result-set scripts, chunk-buffered `Appender` & `QueryAppender`, Arrow C Data/Stream interop, Client VFS (`File`), `Catalog` metadata, `BudgetController`, `ReadOnlySession`, `QueryProgress`/`ProfilingInfo`. | `github.com/ebitengine/purego` |
+| `duckdbsql` | Full `database/sql/driver` adapter (`NewConnector`, `NewReadOnlyConnector`, `Register`, `WithDBInit`/`WithConnInit`, `WithTimeScan`, `Composite[T]`, Go `[]T`/`[N]T`/`map[K]V` binding, `driver.RowsNextResultSet`, `RawConn`). | `duckdb` (stdlib `database/sql` only) |
+| `duckdbarrow` | Pure-Go (`CGO_ENABLED=0`) `apache/arrow-go/v18` integration (`Query`/`QueryStmt`/`QueryScript` -> `array.RecordReader`, `StmtSchema`, `ExportSchema`/`ExportRecordBatch`, `AppendRecordBatch`/`AppendRecordReader`, `RegisterRecordBatch`/`RegisterRecordReader`). | `github.com/apache/arrow-go/v18` |
+
+---
+
+## Comparison with Official `duckdb/duckdb-go/v2`
+
+`duckdbspike` targets Go services that want **zero-cgo builds (`CGO_ENABLED=0`)**, **pinned & SHA-256-verified native library loading**, **strict streaming & memory/cancellation isolation**, and full core SQL/Arrow/`database/sql` ergonomics without sacrificing type exactness.
+
+### Feature Matrix
+
+| Capability | `duckdb/duckdb-go/v2` (Official CGO) | `bububa/duckdbspike` (`CGO_ENABLED=0`) |
+| :--- | :--- | :--- |
+| Build model | Requires CGO + C/C++ toolchain | **Pure Go (`CGO_ENABLED=0`)** via `purego` |
+| Native library verification | Linked at build time | Runtime path/permission guards + **SHA-256 checksum** + pinned `v1.5.6` version check |
+| Streaming query execution | Optional / chunk fetch | **Streaming-only** (`duckdb_pending_prepared_streaming` + `duckdb_result_is_streaming == true`) |
+| Cooperative cancellation | `duckdb_interrupt` | Latched cancellation with periodic `duckdb_interrupt` re-assertion & **no-deadline join** |
+| Core SQL types (38/38 runtime `DUCKDB_TYPE`) | Supported | Supported (exact types, no lossy float/JSON intermediates; **read-only recursive `VARIANT` decoding**) |
+| `database/sql` driver | Built-in (`Connector`, `Composite[T]`, `WithBootQueries`) | `duckdbsql` (`NewConnector`, `NewReadOnlyConnector`, `WithDBInit`/`WithConnInit`, `Composite[T]`, Go `[]T`/`[N]T`/`map[K]V`, **`RowsNextResultSet`**) |
+| Bulk `Appender` & `QueryAppender` | Chunk-buffered `Appender` + `QueryAppender` | Chunk-buffered (2048-row `DataChunk`) `AppendRow` / `AppendRows`, `DefaultValue`, `AddColumn`, `QueryAppender` |
+| Apache Arrow (C Data & C Stream) | CGO `arrow/cdata` + `Arrow` / `RegisterView` | **Pure-Go (`CGO_ENABLED=0`)** `duckdbarrow`: bidirectional C Data + streaming `duckdb_arrow_scan` via 6 process-wide singleton callbacks |
+| Client VFS (`duckdb_file_system_*`) & `Catalog` | Not exposed in Go API | **`Conn.OpenFile` (`io.ReadWriteSeeker`)** & **`CatalogTypeName`/`LookupCatalogEntry`** |
+| Resource budgeting & read-only isolation | Manual SQL / OS limits | Built-in **`BudgetController`**, `DecodeLimits`/`ResultLimits`, and **`ReadOnlySession`** |
+| **Extensions & Engine Hooks (UDFs/Table/Copy/Cast)** | **Supported** (Scalar/Aggregate/Table/Copy/ReplacementScan) | **Not implemented** (see below) |
+
+### Important Unimplemented / Intentionally Excluded Features
+
+Please review these explicit boundaries before adopting `duckdbspike`:
+
+1. **No Custom Engine Extensions or Callback Hooks**:
+   - Not implemented: **Custom Scalar Functions (UDFs)**, **Aggregate Functions**, **Table Functions**, **Custom Copy Functions**, **Custom Cast Functions**, **Replacement Scans**, **Custom Log Storage**, **Custom Config Options**, and **Custom Logical Types**.
+   - If your application needs to register Go functions callable from inside DuckDB SQL, use the official CGO `duckdb/duckdb-go/v2` driver.
+   - *(Note: DuckDB's own built-in/official SQL extensions can still be loaded via SQL `INSTALL`/`LOAD` when external access is enabled.)*
+2. **No External Thread-Pool Task Scheduler (`duckdb_execute_tasks*`)**:
+   - Cooperative Go-goroutine worker scheduling for `external_threads > 0` is not bound (also not exposed by official `duckdb-go/v2`).
+3. **Intentionally Disallowed Native Paths**:
+   - **Non-streaming queries (`duckdb_pending_prepared`)** are never used; `Query` always enforces streaming results (`ErrNotStreaming` if DuckDB materializes a result such as `INSERT ... RETURNING`).
+   - **Lossy numeric C helpers** (`duckdb_decimal_to_double`, `duckdb_hugeint_to_double`, etc.) are never used; all exact numeric values stay lossless.
+   - **Library unloading (`dlclose` / `FreeLibrary`)** is never called; mapped libraries live for the process lifetime.
+4. **DuckDB `v1.5.6` Upstream C API Boundaries**:
+   - **`GEOMETRY` and `VARIANT` parameter binding / Appender writes**: DuckDB `v1.5.6` C API does not provide `duckdb_create_geometry` or `duckdb_create_variant` constructors. Both types are **read-only** (full decoding supported; binding fails with `ErrUnsupportedType`).
+   - **`duckdb_arrow_scan` / `duckdb_arrow_array_scan` projection-pushdown quirk**: In DuckDB `v1.5.6`, querying a registered Arrow view while skipping leading columns (e.g. `SELECT col2 FROM arrow_view`) can crash inside DuckDB's C++ `FactoryGetNext`. Project all columns from Arrow views, or ingest into a temporary table via `duckdbarrow.AppendRecordReader` for arbitrary column projections.
+5. **Platform Gate (`darwin/amd64` unsupported)**:
+   - Only platforms with recorded real-native acceptance runs are allowed at load time (`darwin/arm64`, `linux/amd64`, `linux/arm64`, `windows/amd64`). Unverified platforms fail with `ErrUnsupportedPlatform`.
+
+---
 
 ## Approved Native Artifact & Platform Matrix
 
@@ -19,37 +75,27 @@
 | `windows/amd64` | **Accepted** (real native verified) | DuckDB `v1.5.6` (`libduckdb-windows-amd64.zip`) | `7e90bdef028d57b45490d6f53530e3c012a5d9abdc4c6723449200663dc84ed0` | MIT     |
 | `darwin/amd64`  | Unsupported (unverified)            | —                                               | —                                                                  | —       |
 
-Platforms without a real native acceptance record are rejected at load time with
-`ErrUnsupportedPlatform`. Cross-compilation is not acceptance.
+Platforms without a real native acceptance record are rejected at load time with `ErrUnsupportedPlatform`. Cross-compilation is not acceptance.
+
+---
 
 ## Guarantees & Explicit Boundaries
 
-- **Streaming only**: `Query` uses `duckdb_pending_prepared_streaming` (deprecated
-  upstream, isolated in `internal/abi`, pinned to `v1.5.6`) and asserts
-  `duckdb_result_is_streaming == true`. Non-streaming `duckdb_pending_prepared`
-  materializes outside `memory_limit` and is never used.
-- **Exact types**: No `float64`, string, or JSON intermediate layer. Signed/unsigned
-  integers, 128-bit `Hugeint`/`Uhugeint`, all four physical widths of `Decimal`,
-  length-aware `Varchar`/`Blob` (preserving embedded NUL and empty vs NULL),
-  unit-preserving temporal types, and nested `List`/`Array`/`Struct`/`Map` are
-  decoded into owned Go values. Unsupported logical types fail at statement/result
-  inspection even if all rows are NULL or empty.
-- **Cooperative native cancellation & no-deadline join**: Cancellation latches and
-  re-asserts `duckdb_interrupt` (surviving DuckDB's `InitialCleanup` interrupt
-  reset) until the native scope exits. `Rows.Close`, `Conn.Close`, and
-  `Database.Close` interrupt in-flight work and join all native calls and cancel
-  executors before releasing or reusing handles.
-- **Read-only session isolation**: `SessionWorkspace.OpenReadOnly` seals input
-  Parquet files and the temporary catalog read-only, checkpoints and fully closes
-  the write instance, reopens `READ_ONLY`, applies `allowed_paths`,
-  `enable_external_access=false`, and `lock_configuration=true`. Two DuckDB engine
-  residuals remain (`CREATE TEMP TABLE` in memory and `COPY TO spill/`), so
-  `ReadOnlySession` is strictly for trusted, parameterized internal query templates.
+- **Streaming only**: `Query` uses `duckdb_pending_prepared_streaming` (isolated in `internal/abi`, pinned to `v1.5.6`) and asserts `duckdb_result_is_streaming == true`.
+- **Exact types & owned Go memory**: Signed/unsigned integers, 128-bit `Hugeint`/`Uhugeint`, all four physical widths of `Decimal`, `Varchar`/`Blob`/`Bit`/`Bignum`/`UUID`/`Enum`/`Geometry`, unit-preserving temporal types (including `±infinity`), `List`/`Array`/`Struct`/`Map`/`Union`, and recursive `VARIANT` values are decoded into Go-owned memory that never aliases native buffers. Unsupported logical types fail at prepare/result inspection even when all rows are `NULL` or empty.
+- **Cooperative native cancellation & no-deadline join**: Cancellation latches and re-asserts `duckdb_interrupt` (surviving DuckDB's `InitialCleanup` interrupt reset) until the native scope exits. `Rows.Close`, `ArrowRows.Close`, `Conn.Close`, and `Database.Close` interrupt in-flight work and join all native calls and cancel executors before releasing or reusing handles.
+- **Read-only session isolation**: `SessionWorkspace.OpenReadOnly` seals input Parquet files and the temporary catalog read-only, checkpoints and closes the write instance, reopens `READ_ONLY`, and applies `allowed_paths`, `enable_external_access=false`, and `lock_configuration=true`. Two DuckDB engine residuals remain (`CREATE TEMP TABLE` in memory and `COPY TO spill/`), so `ReadOnlySession` is intended for trusted, parameterized internal query templates.
+
+---
+
+## Quick Links
+
+- **[USAGE.md](USAGE.md)** — Practical examples for `duckdb`, `duckdbsql`, `duckdbarrow`, `Appender`, `VARIANT`, Client VFS, `Catalog`, `BudgetController`, and `ReadOnlySession`.
+- **[DEVELOPMENT.md](DEVELOPMENT.md)** — Repository layout, build/test commands, CI matrix, and `abi.PinnedVersion` upgrade procedure.
 
 ## Native Upgrade Contract
 
-Upgrading `abi.PinnedVersion` requires re-running the full real-native matrix on
-every accepted platform:
+Upgrading `abi.PinnedVersion` requires re-running the full real-native matrix on every accepted platform:
 
 ```sh
 DUCKDB_HEADER_DIR=/path/to/headers \

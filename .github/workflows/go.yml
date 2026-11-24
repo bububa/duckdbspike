@@ -2,9 +2,9 @@ name: Go
 
 on:
   push:
-    branches: [master, main]
+    branches: [master, main, develop]
   pull_request:
-    branches: [master, main]
+    branches: [master, main, develop]
   workflow_dispatch:
 
 jobs:
@@ -32,10 +32,15 @@ jobs:
       - name: Dependencies
         run: go mod download
 
-      - name: Build & Vet
+      - name: Format, Build & Vet
         run: |
+          test -z "$(gofmt -l duckdb duckdbarrow duckdbsql internal)"
           CGO_ENABLED=0 go build -v ./...
           CGO_ENABLED=0 go vet ./...
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build ./...
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...
 
       - name: Test
         run: CGO_ENABLED=0 go test -v -count=1 ./...
