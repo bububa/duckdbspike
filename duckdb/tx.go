@@ -156,12 +156,22 @@ func (tx *Tx) QueryNamed(ctx context.Context, sql string, args ...NamedArg) (*Ro
 	return tx.conn.queryWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
-// ExecScript executes a multi-statement SQL script within tx.
-func (tx *Tx) ExecScript(ctx context.Context, sql string) (ExecResult, error) {
+// ExecScript executes a multi-statement SQL script within tx, binding optional
+// positional args to the final statement.
+func (tx *Tx) ExecScript(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
 	if tx == nil || tx.conn == nil {
 		return ExecResult{}, ErrTxDone
 	}
-	return tx.conn.execScriptWithTx(ctx, tx, sql)
+	return tx.conn.execScriptWithBinder(ctx, tx, sql, len(args) > 0, func(s *Stmt) error { return s.bindLocked(args) })
+}
+
+// ExecScriptNamed executes a multi-statement SQL script within tx, binding
+// named parameters ($name) to the final statement.
+func (tx *Tx) ExecScriptNamed(ctx context.Context, sql string, args ...NamedArg) (ExecResult, error) {
+	if tx == nil || tx.conn == nil {
+		return ExecResult{}, ErrTxDone
+	}
+	return tx.conn.execScriptWithBinder(ctx, tx, sql, len(args) > 0, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
 // QueryScript executes preceding statements and streams the final statement within tx.
@@ -169,7 +179,16 @@ func (tx *Tx) QueryScript(ctx context.Context, sql string, args ...Value) (*Rows
 	if tx == nil || tx.conn == nil {
 		return nil, ErrTxDone
 	}
-	return tx.conn.queryScriptWithTx(ctx, tx, sql, args...)
+	return tx.conn.queryScriptWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+}
+
+// QueryScriptNamed executes preceding statements and streams the final
+// statement with named parameters ($name) within tx.
+func (tx *Tx) QueryScriptNamed(ctx context.Context, sql string, args ...NamedArg) (*Rows, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	return tx.conn.queryScriptWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
 // NewAppender opens an exclusive bulk Appender within tx.

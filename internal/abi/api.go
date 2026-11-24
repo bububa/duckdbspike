@@ -47,6 +47,16 @@ type API struct {
 	// Connect allocates an owned connection released by Disconnect.
 	Connect    func(database uintptr, out *uintptr) int32
 	Disconnect func(connection *uintptr)
+	// ConnectionGetClientContext allocates an owned client_context released by
+	// DestroyClientContext. ClientContextGetConfigOption returns an owned
+	// duckdb_value released by DestroyValue (or 0 if option does not exist).
+	ConnectionGetClientContext   func(connection uintptr, outContext *uintptr)
+	ClientContextGetConnectionID func(context uintptr) uint64
+	ClientContextGetConfigOption func(context uintptr, name *byte, outScope *int32) uintptr
+	DestroyClientContext         func(context *uintptr)
+	// GetTableNames returns an owned LIST<VARCHAR> duckdb_value released by
+	// DestroyValue (or 0 on invalid SQL).
+	GetTableNames func(connection uintptr, query *byte, qualified bool) uintptr
 	// Interrupt stores an atomic flag; it takes no client-context lock.
 	Interrupt func(connection uintptr)
 	// QueryProgress snapshots live execution progress for connection.
@@ -166,13 +176,51 @@ type API struct {
 	CreateStructValue   func(structType uintptr, values *uintptr) uintptr
 	CreateMapValue      func(mapType uintptr, keys *uintptr, values *uintptr, count uint64) uintptr
 	CreateUnionValue    func(unionType uintptr, tagIndex uint64, value uintptr) uintptr
-	// GetMapKey and GetMapValue return owned duckdb_value handles released by
-	// DestroyValue. GetVarchar returns an owned C string released by Free.
-	GetMapSize   func(value uintptr) uint64
-	GetMapKey    func(value uintptr, index uint64) uintptr
-	GetMapValue  func(value uintptr, index uint64) uintptr
-	GetVarchar   func(value uintptr) uintptr
-	DestroyValue func(value *uintptr)
+	// Value inspection helpers. GetValueType returns a BORROWED logical type
+	// valid while value is alive (must NOT be destroyed). GetBlob, GetBit, and
+	// GetBignum return structs whose Data pointer is owned and freed by Free.
+	// GetListChild, GetStructChild, GetMapKey, and GetMapValue return owned
+	// duckdb_value handles released by DestroyValue. GetVarchar returns an owned
+	// C string released by Free.
+	GetValueType   func(value uintptr) uintptr
+	IsNullValue    func(value uintptr) bool
+	GetBool        func(value uintptr) bool
+	GetInt8        func(value uintptr) int8
+	GetInt16       func(value uintptr) int16
+	GetInt32       func(value uintptr) int32
+	GetInt64       func(value uintptr) int64
+	GetUint8       func(value uintptr) uint8
+	GetUint16      func(value uintptr) uint16
+	GetUint32      func(value uintptr) uint32
+	GetUint64      func(value uintptr) uint64
+	GetHugeint     func(value uintptr) Hugeint
+	GetUhugeint    func(value uintptr) Uhugeint
+	GetDecimal     func(value uintptr) Decimal
+	GetFloat       func(value uintptr) float32
+	GetDouble      func(value uintptr) float64
+	GetDate        func(value uintptr) Date
+	GetTime        func(value uintptr) Time
+	GetTimeNS      func(value uintptr) TimeNS
+	GetTimeTZ      func(value uintptr) TimeTZ
+	GetTimestamp   func(value uintptr) Timestamp
+	GetTimestampS  func(value uintptr) TimestampS
+	GetTimestampMS func(value uintptr) TimestampMS
+	GetTimestampNS func(value uintptr) TimestampNS
+	GetTimestampTZ func(value uintptr) Timestamp
+	GetInterval    func(value uintptr) Interval
+	GetBlob        func(value uintptr) Blob
+	GetBit         func(value uintptr) Bit
+	GetBignum      func(value uintptr) Bignum
+	GetUUID        func(value uintptr) Uhugeint
+	GetEnumValue   func(value uintptr) uint64
+	GetListSize    func(value uintptr) uint64
+	GetListChild   func(value uintptr, index uint64) uintptr
+	GetStructChild func(value uintptr, index uint64) uintptr
+	GetMapSize     func(value uintptr) uint64
+	GetMapKey      func(value uintptr, index uint64) uintptr
+	GetMapValue    func(value uintptr, index uint64) uintptr
+	GetVarchar     func(value uintptr) uintptr
+	DestroyValue   func(value *uintptr)
 
 	// PendingPreparedStreaming is deprecated upstream but is the only entry
 	// point that yields a streaming result in PinnedVersion. It always
@@ -338,6 +386,11 @@ func (a *API) symbols() []symbol {
 		{&a.DestroyErrorData, "duckdb_destroy_error_data"},
 		{&a.Connect, "duckdb_connect"},
 		{&a.Disconnect, "duckdb_disconnect"},
+		{&a.ConnectionGetClientContext, "duckdb_connection_get_client_context"},
+		{&a.ClientContextGetConnectionID, "duckdb_client_context_get_connection_id"},
+		{&a.ClientContextGetConfigOption, "duckdb_client_context_get_config_option"},
+		{&a.DestroyClientContext, "duckdb_destroy_client_context"},
+		{&a.GetTableNames, "duckdb_get_table_names"},
 		{&a.Interrupt, "duckdb_interrupt"},
 		{&a.QueryProgress, "duckdb_query_progress"},
 		{&a.GetProfilingInfo, "duckdb_get_profiling_info"},
@@ -427,6 +480,40 @@ func (a *API) symbols() []symbol {
 		{&a.CreateStructValue, "duckdb_create_struct_value"},
 		{&a.CreateMapValue, "duckdb_create_map_value"},
 		{&a.CreateUnionValue, "duckdb_create_union_value"},
+		{&a.GetValueType, "duckdb_get_value_type"},
+		{&a.IsNullValue, "duckdb_is_null_value"},
+		{&a.GetBool, "duckdb_get_bool"},
+		{&a.GetInt8, "duckdb_get_int8"},
+		{&a.GetInt16, "duckdb_get_int16"},
+		{&a.GetInt32, "duckdb_get_int32"},
+		{&a.GetInt64, "duckdb_get_int64"},
+		{&a.GetUint8, "duckdb_get_uint8"},
+		{&a.GetUint16, "duckdb_get_uint16"},
+		{&a.GetUint32, "duckdb_get_uint32"},
+		{&a.GetUint64, "duckdb_get_uint64"},
+		{&a.GetHugeint, "duckdb_get_hugeint"},
+		{&a.GetUhugeint, "duckdb_get_uhugeint"},
+		{&a.GetDecimal, "duckdb_get_decimal"},
+		{&a.GetFloat, "duckdb_get_float"},
+		{&a.GetDouble, "duckdb_get_double"},
+		{&a.GetDate, "duckdb_get_date"},
+		{&a.GetTime, "duckdb_get_time"},
+		{&a.GetTimeNS, "duckdb_get_time_ns"},
+		{&a.GetTimeTZ, "duckdb_get_time_tz"},
+		{&a.GetTimestamp, "duckdb_get_timestamp"},
+		{&a.GetTimestampS, "duckdb_get_timestamp_s"},
+		{&a.GetTimestampMS, "duckdb_get_timestamp_ms"},
+		{&a.GetTimestampNS, "duckdb_get_timestamp_ns"},
+		{&a.GetTimestampTZ, "duckdb_get_timestamp_tz"},
+		{&a.GetInterval, "duckdb_get_interval"},
+		{&a.GetBlob, "duckdb_get_blob"},
+		{&a.GetBit, "duckdb_get_bit"},
+		{&a.GetBignum, "duckdb_get_bignum"},
+		{&a.GetUUID, "duckdb_get_uuid"},
+		{&a.GetEnumValue, "duckdb_get_enum_value"},
+		{&a.GetListSize, "duckdb_get_list_size"},
+		{&a.GetListChild, "duckdb_get_list_child"},
+		{&a.GetStructChild, "duckdb_get_struct_child"},
 		{&a.GetMapSize, "duckdb_get_map_size"},
 		{&a.GetMapKey, "duckdb_get_map_key"},
 		{&a.GetMapValue, "duckdb_get_map_value"},

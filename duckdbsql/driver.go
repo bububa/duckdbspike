@@ -21,6 +21,7 @@ type connectorConfig struct {
 	budget          *duckdb.BudgetController
 	budgetCf        duckdb.InstanceConfig
 	options         []duckdb.Option
+	dbInit          func(ctx context.Context, conn *duckdb.Conn) error
 	connInit        func(ctx context.Context, conn *duckdb.Conn) error
 	scanTime        bool
 	hasDecodeLimits bool
@@ -52,6 +53,13 @@ func WithOptions(opts ...duckdb.Option) ConnectorOption {
 	return func(c *connectorConfig) {
 		c.options = append(c.options, opts...)
 	}
+}
+
+// WithDBInit registers a one-time database initialization hook executed once
+// when NewConnector opens a *duckdb.Database (useful for schema DDL, global
+// SET statements, or initial bootstrapping). Ignored by NewReadOnlyConnector.
+func WithDBInit(fn func(ctx context.Context, conn *duckdb.Conn) error) ConnectorOption {
+	return func(c *connectorConfig) { c.dbInit = fn }
 }
 
 // WithConnInit registers a callback executed on every newly created underlying
@@ -199,6 +207,33 @@ func NewConnector(lib *duckdb.Library, dsn string, opts ...ConnectorOption) (*Co
 	}
 	if err != nil {
 		return nil, err
+	}
+	if cfg.dbInit != nil {
+		initConn, initErr := db.Connect(ctx)
+		if initErr != nil {
+			_ = db.Close()
+			return nil, initErr
+		}
+		if cfg.hasDecodeLimits {
+			if err := initConn.SetDecodeLimits(cfg.decodeLimits); err != nil {
+				_ = initConn.Close()
+				_ = db.Close()
+				return nil, err
+			}
+		}
+		if cfg.hasResultLimits {
+			if err := initConn.SetResultLimits(cfg.resultLimits); err != nil {
+				_ = initConn.Close()
+				_ = db.Close()
+				return nil, err
+			}
+		}
+		initErr = cfg.dbInit(ctx, initConn)
+		_ = initConn.Close()
+		if initErr != nil {
+			_ = db.Close()
+			return nil, initErr
+		}
 	}
 	return &Connector{
 		lib: lib,

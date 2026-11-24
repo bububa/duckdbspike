@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"slices"
 	"strings"
+	"time"
 )
 
 // TypeKind is the closed enum of logical SQL types supported by this binding.
@@ -561,6 +562,81 @@ func (d Decimal) Coefficient() *big.Int {
 	return d.Value.BigInt()
 }
 
+// BigRat returns an exact *big.Rat representing d without floating-point loss.
+func (d Decimal) BigRat() *big.Rat {
+	denom := new(big.Int)
+	if int(d.Scale) < len(pow10Table) {
+		denom.Set(pow10Table[d.Scale])
+	} else {
+		denom.Exp(big.NewInt(10), big.NewInt(int64(d.Scale)), nil)
+	}
+	return new(big.Rat).SetFrac(d.Coefficient(), denom)
+}
+
+// ParseDecimal parses an exact decimal string (for example "-123.45") into a
+// validated Decimal(width, scale) without floating-point intermediates.
+// Fractional digits exceeding scale are rejected with ErrOutOfRange rather than
+// silently truncated.
+func ParseDecimal(s string, width, scale uint8) (Decimal, error) {
+	if width < 1 || width > 38 || scale > width {
+		return Decimal{}, fmt.Errorf("%w: invalid DECIMAL(%d,%d)", ErrInvalidInput, width, scale)
+	}
+	if s == "" {
+		return Decimal{}, fmt.Errorf("%w: empty decimal string", ErrInvalidInput)
+	}
+	raw := s
+	neg := false
+	switch raw[0] {
+	case '-':
+		neg = true
+		raw = raw[1:]
+	case '+':
+		raw = raw[1:]
+	}
+	if raw == "" {
+		return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+	}
+	intPart, fracPart, hasDot := strings.Cut(raw, ".")
+	if hasDot && strings.ContainsRune(fracPart, '.') {
+		return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+	}
+	if intPart == "" && fracPart == "" {
+		return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+	}
+	for i := 0; i < len(intPart); i++ {
+		if intPart[i] < '0' || intPart[i] > '9' {
+			return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+		}
+	}
+	for i := 0; i < len(fracPart); i++ {
+		if fracPart[i] < '0' || fracPart[i] > '9' {
+			return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+		}
+	}
+	if len(fracPart) > int(scale) {
+		return Decimal{}, fmt.Errorf("%w: decimal %q exceeds scale %d", ErrOutOfRange, s, scale)
+	}
+	var b strings.Builder
+	b.Grow(len(intPart) + int(scale) + 1)
+	if neg {
+		b.WriteByte('-')
+	}
+	if intPart == "" {
+		b.WriteByte('0')
+	} else {
+		b.WriteString(intPart)
+	}
+	b.WriteString(fracPart)
+	for i := len(fracPart); i < int(scale); i++ {
+		b.WriteByte('0')
+	}
+	coef, ok := new(big.Int).SetString(b.String(), 10)
+	if !ok {
+		return Decimal{}, fmt.Errorf("%w: invalid decimal %q", ErrInvalidInput, s)
+	}
+	return NewDecimal(width, scale, coef)
+}
+
 // String formats d as an exact decimal string without float conversion.
 func (d Decimal) String() string {
 	coef := d.Value.BigInt()
@@ -603,14 +679,84 @@ func (d Date) IsNegInfinity() bool { return d.Days == DateNegInfinity }
 // IsFinite reports whether d is neither +infinity nor -infinity.
 func (d Date) IsFinite() bool { return d.Days != DateInfinity && d.Days != DateNegInfinity }
 
+// DateFromTime converts t's UTC calendar date into a finite DuckDB Date.
+func DateFromTime(t time.Time) (Date, error) {
+	u := t.UTC()
+	midnight := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	days := midnight.Unix() / 86400
+	if days >= int64(DateInfinity) || days <= int64(DateNegInfinity) {
+		return Date{}, fmt.Errorf("%w: date %s overflows DuckDB DATE range", ErrOutOfRange, u.Format("2006-01-02"))
+	}
+	return Date{Days: int32(days)}, nil
+}
+
+// Time converts a finite Date into midnight UTC time.Time. Non-finite dates
+// (±infinity) return ErrOutOfRange.
+func (d Date) Time() (time.Time, error) {
+	if !d.IsFinite() {
+		return time.Time{}, fmt.Errorf("%w: non-finite DATE (%d) cannot be converted to time.Time", ErrOutOfRange, d.Days)
+	}
+	return time.Unix(int64(d.Days)*86400, 0).UTC(), nil
+}
+
+// String formats d as YYYY-MM-DD, "infinity", or "-infinity".
+func (d Date) String() string {
+	if d.IsInfinity() {
+		return "infinity"
+	}
+	if d.IsNegInfinity() {
+		return "-infinity"
+	}
+	return time.Unix(int64(d.Days)*86400, 0).UTC().Format("2006-01-02")
+}
+
 // Time is microseconds since 00:00:00.
 type Time struct {
 	Micros int64
 }
 
+// String formats t as HH:MM:SS[.ffffff].
+func (t Time) String() string {
+	return formatDayNanos(t.Micros*1000, 6)
+}
+
 // TimeNS is nanoseconds since 00:00:00.
 type TimeNS struct {
 	Nanos int64
+}
+
+// String formats t as HH:MM:SS[.fffffffff].
+func (t TimeNS) String() string {
+	return formatDayNanos(t.Nanos, 9)
+}
+
+func formatDayNanos(totalNanos int64, maxFrac int) string {
+	neg := totalNanos < 0
+	if neg {
+		totalNanos = -totalNanos
+	}
+	secs := totalNanos / 1_000_000_000
+	nanos := totalNanos % 1_000_000_000
+	h := secs / 3600
+	m := (secs % 3600) / 60
+	s := secs % 60
+	prefix := ""
+	if neg {
+		prefix = "-"
+	}
+	base := fmt.Sprintf("%s%02d:%02d:%02d", prefix, h, m, s)
+	if nanos == 0 {
+		return base
+	}
+	frac := fmt.Sprintf("%09d", nanos)
+	if maxFrac < 9 {
+		frac = frac[:maxFrac]
+	}
+	frac = strings.TrimRight(frac, "0")
+	if frac == "" {
+		return base
+	}
+	return base + "." + frac
 }
 
 const (
@@ -634,6 +780,24 @@ func (t TimeTZ) Validate() error {
 		return fmt.Errorf("%w: TIMETZ offset %d outside [%d, %d]", ErrOutOfRange, t.OffsetSeconds, -timeTZMaxOffset, timeTZMaxOffset)
 	}
 	return nil
+}
+
+// String formats t as HH:MM:SS[.ffffff]±HH:MM[:SS].
+func (t TimeTZ) String() string {
+	base := formatDayNanos(t.Micros*1000, 6)
+	off := t.OffsetSeconds
+	sign := "+"
+	if off < 0 {
+		sign = "-"
+		off = -off
+	}
+	oh := off / 3600
+	om := (off % 3600) / 60
+	os := off % 60
+	if os == 0 {
+		return fmt.Sprintf("%s%s%02d:%02d", base, sign, oh, om)
+	}
+	return fmt.Sprintf("%s%s%02d:%02d:%02d", base, sign, oh, om, os)
 }
 
 // Enum represents a SQL ENUM dictionary member with both its zero-based
@@ -680,12 +844,122 @@ func (t Timestamp) IsFinite() bool {
 	return t.Value != TimestampInfinity && t.Value != TimestampNegInfinity
 }
 
+// TimestampFromTime converts t (in UTC) into a Timestamp of the requested unit.
+// Sub-unit precision is rejected with ErrInvalidInput rather than silently
+// truncated, and out-of-range instants return ErrOutOfRange.
+func TimestampFromTime(t time.Time, unit TimestampUnit) (Timestamp, error) {
+	u := t.UTC()
+	sec := u.Unix()
+	nsec := int64(u.Nanosecond())
+	switch unit {
+	case TimestampUnitSeconds:
+		if nsec != 0 {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s has sub-second precision", ErrInvalidInput, u.Format(time.RFC3339Nano))
+		}
+		if sec == TimestampInfinity || sec == TimestampNegInfinity {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s collides with TIMESTAMP_S infinity sentinel", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		return Timestamp{Value: sec, Unit: unit}, nil
+	case TimestampUnitMillis:
+		if nsec%1_000_000 != 0 {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s has sub-millisecond precision", ErrInvalidInput, u.Format(time.RFC3339Nano))
+		}
+		const maxMillisSec = (math.MaxInt64 - 999) / 1000
+		const minMillisSec = (-math.MaxInt64 + 999) / 1000
+		if sec > maxMillisSec || sec < minMillisSec {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP_MS range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		v := sec*1000 + nsec/1_000_000
+		if v == TimestampInfinity || v == TimestampNegInfinity {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP_MS range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		return Timestamp{Value: v, Unit: unit}, nil
+	case TimestampUnitMicros, TimestampUnitTZ:
+		if nsec%1000 != 0 {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s has sub-microsecond precision", ErrInvalidInput, u.Format(time.RFC3339Nano))
+		}
+		const maxMicrosSec = (math.MaxInt64 - 999_999) / 1_000_000
+		const minMicrosSec = (-math.MaxInt64 + 999_999) / 1_000_000
+		if sec > maxMicrosSec || sec < minMicrosSec {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP microsecond range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		v := sec*1_000_000 + nsec/1000
+		if v == TimestampInfinity || v == TimestampNegInfinity {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP microsecond range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		return Timestamp{Value: v, Unit: unit}, nil
+	case TimestampUnitNanos:
+		const maxNanosSec = (math.MaxInt64 - 999_999_999) / 1_000_000_000
+		const minNanosSec = (-math.MaxInt64 + 999_999_999) / 1_000_000_000
+		if sec > maxNanosSec || sec < minNanosSec {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP_NS range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		v := sec*1_000_000_000 + nsec
+		if v == TimestampInfinity || v == TimestampNegInfinity {
+			return Timestamp{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMP_NS range", ErrOutOfRange, u.Format(time.RFC3339Nano))
+		}
+		return Timestamp{Value: v, Unit: unit}, nil
+	default:
+		return Timestamp{}, fmt.Errorf("%w: unknown timestamp unit %d", ErrInvalidInput, unit)
+	}
+}
+
+// Time converts a finite Timestamp into UTC time.Time. Non-finite timestamps
+// (±infinity) return ErrOutOfRange.
+func (t Timestamp) Time() (time.Time, error) {
+	if !t.IsFinite() {
+		return time.Time{}, fmt.Errorf("%w: non-finite TIMESTAMP (%d) cannot be converted to time.Time", ErrOutOfRange, t.Value)
+	}
+	switch t.Unit {
+	case TimestampUnitSeconds:
+		return time.Unix(t.Value, 0).UTC(), nil
+	case TimestampUnitMillis:
+		return time.UnixMilli(t.Value).UTC(), nil
+	case TimestampUnitMicros, TimestampUnitTZ:
+		return time.UnixMicro(t.Value).UTC(), nil
+	case TimestampUnitNanos:
+		return time.Unix(0, t.Value).UTC(), nil
+	default:
+		return time.Time{}, fmt.Errorf("%w: unknown timestamp unit %d", ErrInvalidInput, t.Unit)
+	}
+}
+
+// String formats t in RFC3339Nano (UTC), "infinity", or "-infinity".
+func (t Timestamp) String() string {
+	if t.IsInfinity() {
+		return "infinity"
+	}
+	if t.IsNegInfinity() {
+		return "-infinity"
+	}
+	tm, err := t.Time()
+	if err != nil {
+		return fmt.Sprintf("TIMESTAMP(%d, unit=%d)", t.Value, t.Unit)
+	}
+	return tm.Format(time.RFC3339Nano)
+}
+
 // Interval preserves DuckDB's three-component interval without collapsing
 // months or days into fixed nanoseconds.
 type Interval struct {
 	Months int32
 	Days   int32
 	Micros int64
+}
+
+// String formats iv as a readable multi-part interval string.
+func (iv Interval) String() string {
+	var parts []string
+	if iv.Months != 0 {
+		parts = append(parts, fmt.Sprintf("%d months", iv.Months))
+	}
+	if iv.Days != 0 {
+		parts = append(parts, fmt.Sprintf("%d days", iv.Days))
+	}
+	if iv.Micros != 0 || len(parts) == 0 {
+		parts = append(parts, formatDayNanos(iv.Micros*1000, 6))
+	}
+	return strings.Join(parts, " ")
 }
 
 // ListValue is an owned variable-length SQL LIST. Empty list (len(Elements)==0)
@@ -851,7 +1125,10 @@ type Geometry struct {
 }
 
 // UnionValue holds the active tagged member of a decoded or bound SQL UNION.
+// Type carries the union's full member LogicalType when decoded from DuckDB or
+// constructed explicitly, enabling round-trip parameter binding.
 type UnionValue struct {
+	Type    LogicalType
 	Tag     uint8
 	TagName string
 	Value   Value
@@ -1678,12 +1955,19 @@ func (v Value) Union() (UnionValue, error) {
 		return UnionValue{}, err
 	}
 	tag := uint8(v.lo)
-	var tagName string
-	if v.lt != nil && int(tag) < len(v.lt.Fields) {
-		tagName = v.lt.Fields[tag].Name
+	var (
+		tagName string
+		lt      LogicalType
+	)
+	if v.lt != nil {
+		lt = *cloneLogicalType(*v.lt)
+		if int(tag) < len(v.lt.Fields) {
+			tagName = v.lt.Fields[tag].Name
+		}
 	}
 	inner, _ := v.ref.(Value)
 	return UnionValue{
+		Type:    lt,
 		Tag:     tag,
 		TagName: tagName,
 		Value:   inner,

@@ -2,6 +2,7 @@ package duckdbsql
 
 import (
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"reflect"
 	"strings"
@@ -9,13 +10,25 @@ import (
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
-// Composite is a generic sql.Scanner that decodes DuckDB STRUCT columns into
-// Go structs (matching `db:"name"` struct tags or case-insensitive exported
-// field names), recursively handling nested structs, slices, pointers, and
-// sql.Scanner fields.
+// Composite is a generic sql.Scanner and driver.Valuer that decodes DuckDB
+// STRUCT columns into Go structs and encodes Go structs into DuckDB STRUCT
+// parameters (matching `db:"name"` struct tags or exported field names),
+// recursively handling nested structs, slices, pointers, and sql.Scanner /
+// driver.Valuer fields.
 type Composite[T any] struct {
 	val   T
 	valid bool
+}
+
+// NewComposite wraps v as a non-NULL Composite[T] suitable for binding as a
+// DuckDB STRUCT SQL parameter.
+func NewComposite[T any](v T) Composite[T] {
+	return Composite[T]{val: v, valid: true}
+}
+
+// NullComposite returns a SQL NULL Composite[T].
+func NullComposite[T any]() Composite[T] {
+	return Composite[T]{}
 }
 
 // Get returns the decoded Go value (or the zero value of T when SQL NULL).
@@ -23,6 +36,104 @@ func (c Composite[T]) Get() T { return c.val }
 
 // Valid reports whether the scanned column was non-NULL.
 func (c Composite[T]) Valid() bool { return c.valid }
+
+// Value implements database/sql/driver.Valuer, encoding a valid Composite[T]
+// into a duckdb.StructValue (or nil when SQL NULL).
+func (c Composite[T]) Value() (driver.Value, error) {
+	if !c.valid {
+		return nil, nil
+	}
+	return encodeStructFromGo(reflect.ValueOf(c.val), 0)
+}
+
+func encodeStructFromGo(rv reflect.Value, depth int) (duckdb.StructValue, error) {
+	if depth > 64 {
+		return duckdb.StructValue{}, fmt.Errorf("%w: Composite struct nesting exceeds depth limit", duckdb.ErrLimitExceeded)
+	}
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return duckdb.StructValue{}, fmt.Errorf("%w: nil pointer struct", duckdb.ErrInvalidInput)
+		}
+		rv = rv.Elem()
+	}
+	if rv.Kind() != reflect.Struct {
+		return duckdb.StructValue{}, fmt.Errorf("%w: Composite.Value target must be a struct, got %s", duckdb.ErrTypeMismatch, rv.Type())
+	}
+	rt := rv.Type()
+	fields := make([]duckdb.StructFieldValue, 0, rt.NumField())
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if !sf.IsExported() {
+			continue
+		}
+		tag := sf.Tag.Get("db")
+		if tag == "-" {
+			continue
+		}
+		name := sf.Name
+		if tag != "" {
+			if n, _, _ := strings.Cut(tag, ","); n != "" {
+				name = n
+			}
+		}
+		fv := rv.Field(i)
+		dv, lt, err := encodeStructField(fv, depth+1)
+		if err != nil {
+			return duckdb.StructValue{}, fmt.Errorf("field %q: %w", name, err)
+		}
+		fields = append(fields, duckdb.StructFieldValue{
+			Name:  name,
+			Type:  lt,
+			Value: dv,
+		})
+	}
+	if len(fields) == 0 {
+		return duckdb.StructValue{}, fmt.Errorf("%w: struct %s has no exported fields", duckdb.ErrInvalidInput, rt)
+	}
+	return duckdb.StructValue{Fields: fields}, nil
+}
+
+func encodeStructField(fv reflect.Value, depth int) (duckdb.Value, duckdb.LogicalType, error) {
+	if depth > 64 {
+		return duckdb.Value{}, duckdb.LogicalType{}, fmt.Errorf("%w: Composite nesting exceeds depth limit", duckdb.ErrLimitExceeded)
+	}
+	v, err := toDuckDBValueDepth(fv.Interface(), depth)
+	if err != nil {
+		// If fv is a nested Go struct (not a known duckdb scalar/driver.Valuer),
+		// encode it recursively as a DuckDB STRUCT.
+		t := fv.Type()
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		if t.Kind() == reflect.Struct && !isDirectScalarStructType(t) {
+			if fv.Kind() == reflect.Ptr && fv.IsNil() {
+				lt, ltErr := inferLogicalTypeFromGoType(t, depth)
+				if ltErr != nil {
+					return duckdb.Value{}, duckdb.LogicalType{}, ltErr
+				}
+				return duckdb.TypedNullValue(lt), lt, nil
+			}
+			st, stErr := encodeStructFromGo(fv, depth)
+			if stErr != nil {
+				return duckdb.Value{}, duckdb.LogicalType{}, stErr
+			}
+			sv, svErr := duckdb.NewStructValue(st.Fields)
+			if svErr != nil {
+				return duckdb.Value{}, duckdb.LogicalType{}, svErr
+			}
+			return sv, sv.Type(), nil
+		}
+		return duckdb.Value{}, duckdb.LogicalType{}, err
+	}
+	if v.IsNull() {
+		lt, ltErr := inferLogicalTypeFromGoType(fv.Type(), depth)
+		if ltErr != nil {
+			return duckdb.TypedNullValue(duckdb.ScalarType(duckdb.TypeSQLNull)), duckdb.ScalarType(duckdb.TypeSQLNull), nil
+		}
+		return duckdb.TypedNullValue(lt), lt, nil
+	}
+	return v, v.Type(), nil
+}
 
 // Scan implements database/sql.Scanner.
 func (c *Composite[T]) Scan(src any) error {

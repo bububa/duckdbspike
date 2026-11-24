@@ -124,6 +124,12 @@ type ArrowArray struct {
 	PrivateData uintptr
 }
 
+// Blob mirrors struct duckdb_blob.
+type Blob struct {
+	Data uintptr
+	Size uint64
+}
+
 // Bit mirrors struct duckdb_bit.
 type Bit struct {
 	Data uintptr
@@ -303,4 +309,12 @@ const (
 	StatementTypeCopyDatabase     int32 = 28
 	StatementTypeUpdateExtensions int32 = 29
 	StatementTypeMergeInto        int32 = 30
+)
+
+// Config option scopes mirror duckdb_config_option_scope (v1.5.6).
+const (
+	ConfigOptionScopeInvalid int32 = 0
+	ConfigOptionScopeLocal   int32 = 1
+	ConfigOptionScopeSession int32 = 2
+	ConfigOptionScopeGlobal  int32 = 3
 )

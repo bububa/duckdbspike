@@ -9,13 +9,22 @@ import (
 )
 
 // ExecScript extracts and executes all statements in sql sequentially under ctx
-// cancellation. RowsAffected reports the total rows changed across statements
-// in the script. Empty or comment-only scripts return zero ExecResult and nil.
-func (c *Conn) ExecScript(ctx context.Context, sql string) (ExecResult, error) {
-	return c.execScriptWithTx(ctx, nil, sql)
+// cancellation. Statements 0..N-2 must have no parameters; args are bound to
+// the final statement N-1. RowsAffected reports the total rows changed across
+// statements in the script. Empty or comment-only scripts return zero
+// ExecResult and nil (unless args are supplied, which returns ErrInvalidInput).
+func (c *Conn) ExecScript(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
+	return c.execScriptWithBinder(ctx, nil, sql, len(args) > 0, func(s *Stmt) error { return s.bindLocked(args) })
 }
 
-func (c *Conn) execScriptWithTx(ctx context.Context, tx *Tx, sql string) (ExecResult, error) {
+// ExecScriptNamed extracts and executes all statements in sql sequentially
+// under ctx cancellation, binding named parameters ($name) to the final
+// statement N-1.
+func (c *Conn) ExecScriptNamed(ctx context.Context, sql string, args ...NamedArg) (ExecResult, error) {
+	return c.execScriptWithBinder(ctx, nil, sql, len(args) > 0, func(s *Stmt) error { return s.bindNamedLocked(args) })
+}
+
+func (c *Conn) execScriptWithBinder(ctx context.Context, tx *Tx, sql string, hasArgs bool, bindLast func(*Stmt) error) (ExecResult, error) {
 	if c == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -60,6 +69,9 @@ func (c *Conn) execScriptWithTx(ctx context.Context, tx *Tx, sql string) (ExecRe
 		if msg != "" {
 			return ExecResult{}, nativeError("extract_statements", abi.ErrorInvalid, msg)
 		}
+		if hasArgs {
+			return ExecResult{}, fmt.Errorf("%w: script contains no statements to bind parameters to", ErrInvalidInput)
+		}
 		if !scope.tryFinish() {
 			return ExecResult{}, scope.err()
 		}
@@ -75,7 +87,11 @@ func (c *Conn) execScriptWithTx(ctx context.Context, tx *Tx, sql string) (ExecRe
 		if err != nil {
 			return ExecResult{}, err
 		}
-		res, execErr := s.execNoFinishLocked(func() error { return s.bindLocked(nil) }, scope)
+		binder := func() error { return s.bindLocked(nil) }
+		if i == count-1 && bindLast != nil {
+			binder = func() error { return bindLast(s) }
+		}
+		res, execErr := s.execNoFinishLocked(binder, scope)
 		s.releaseLocked()
 		if execErr != nil {
 			return ExecResult{}, execErr
@@ -92,10 +108,17 @@ func (c *Conn) execScriptWithTx(ctx context.Context, tx *Tx, sql string) (ExecRe
 // sequentially (which must have no parameters), and binds args to stream the
 // final statement N-1. The returned Rows owns the final Stmt and cancelScope.
 func (c *Conn) QueryScript(ctx context.Context, sql string, args ...Value) (*Rows, error) {
-	return c.queryScriptWithTx(ctx, nil, sql, args...)
+	return c.queryScriptWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindLocked(args) })
 }
 
-func (c *Conn) queryScriptWithTx(ctx context.Context, tx *Tx, sql string, args ...Value) (*Rows, error) {
+// QueryScriptNamed extracts all statements in sql, executes statements 0..N-2
+// sequentially (which must have no parameters), and binds named parameters
+// ($name) to stream the final statement N-1.
+func (c *Conn) QueryScriptNamed(ctx context.Context, sql string, args ...NamedArg) (*Rows, error) {
+	return c.queryScriptWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+}
+
+func (c *Conn) queryScriptWithBinder(ctx context.Context, tx *Tx, sql string, bindLast func(*Stmt) error) (*Rows, error) {
 	if c == nil {
 		return nil, ErrClosed
 	}
@@ -169,7 +192,7 @@ func (c *Conn) queryScriptWithTx(ctx context.Context, tx *Tx, sql string, args .
 		c.endScopeLocked(scope)
 		return nil, err
 	}
-	rows, err := lastStmt.startLocked(func() error { return lastStmt.bindLocked(args) }, scope)
+	rows, err := lastStmt.startLocked(func() error { return bindLast(lastStmt) }, scope)
 	if err != nil {
 		lastStmt.releaseLocked()
 		c.endScopeLocked(scope)

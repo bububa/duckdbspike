@@ -55,11 +55,14 @@ func (c *sqlConn) ExecContext(ctx context.Context, query string, args []driver.N
 		return nil, err
 	}
 	var res duckdb.ExecResult
+	hasSemi := strings.ContainsRune(query, ';')
 	switch {
+	case hasSemi && isNamed:
+		res, err = c.conn.ExecScriptNamed(ctx, query, named...)
+	case hasSemi:
+		res, err = c.conn.ExecScript(ctx, query, pos...)
 	case isNamed:
 		res, err = c.conn.ExecNamed(ctx, query, named...)
-	case len(pos) == 0 && strings.ContainsRune(query, ';'):
-		res, err = c.conn.ExecScript(ctx, query)
 	default:
 		res, err = c.conn.Exec(ctx, query, pos...)
 	}
@@ -78,11 +81,14 @@ func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.
 		return nil, err
 	}
 	var rows *duckdb.Rows
+	hasSemi := strings.ContainsRune(query, ';')
 	switch {
+	case hasSemi && isNamed:
+		rows, err = c.conn.QueryScriptNamed(ctx, query, named...)
+	case hasSemi:
+		rows, err = c.conn.QueryScript(ctx, query, pos...)
 	case isNamed:
 		rows, err = c.conn.QueryNamed(ctx, query, named...)
-	case strings.ContainsRune(query, ';'):
-		rows, err = c.conn.QueryScript(ctx, query, pos...)
 	default:
 		rows, err = c.conn.Query(ctx, query, pos...)
 	}

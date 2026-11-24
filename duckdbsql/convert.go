@@ -1,15 +1,25 @@
 package duckdbsql
 
 import (
+	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"math/big"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/bububa/duckdbspike/duckdb"
 )
 
 func toDuckDBValue(v any) (duckdb.Value, error) {
+	return toDuckDBValueDepth(v, 0)
+}
+
+func toDuckDBValueDepth(v any, depth int) (duckdb.Value, error) {
+	if depth > 64 {
+		return duckdb.Value{}, fmt.Errorf("%w: parameter nesting depth exceeds limit", duckdb.ErrLimitExceeded)
+	}
 	if v == nil {
 		return duckdb.NullValue(), nil
 	}
@@ -48,7 +58,19 @@ func toDuckDBValue(v any) (duckdb.Value, error) {
 	case string:
 		return duckdb.VarcharValue(x), nil
 	case []byte:
+		if x == nil {
+			return duckdb.NullValue(), nil
+		}
 		return duckdb.BlobValue(x), nil
+	case *big.Int:
+		if x == nil {
+			return duckdb.NullValue(), nil
+		}
+		bn, err := duckdb.BignumFromBigInt(x)
+		if err != nil {
+			return duckdb.Value{}, err
+		}
+		return duckdb.BignumValue(bn), nil
 	case duckdb.Hugeint:
 		return duckdb.HugeintValue(x), nil
 	case duckdb.Uhugeint:
@@ -69,6 +91,11 @@ func toDuckDBValue(v any) (duckdb.Value, error) {
 		return duckdb.TimestampValue(x)
 	case duckdb.Interval:
 		return duckdb.IntervalValue(x), nil
+	case duckdb.Enum:
+		if x.Label == "" {
+			return duckdb.Value{}, fmt.Errorf("%w: duckdb.Enum requires a non-empty Label or explicit duckdb.EnumValue", duckdb.ErrInvalidInput)
+		}
+		return duckdb.VarcharValue(x.Label), nil
 	case duckdb.Bit:
 		return duckdb.BitValue(x)
 	case duckdb.Bignum:
@@ -81,38 +108,252 @@ func toDuckDBValue(v any) (duckdb.Value, error) {
 		return duckdb.NewStructValue(x.Fields)
 	case duckdb.MapValue:
 		return duckdb.NewMapValue(x.KeyType, x.ValueType, x.Entries)
+	case duckdb.UnionValue:
+		if x.Type.Kind != duckdb.TypeUnion {
+			return duckdb.Value{}, fmt.Errorf("%w: duckdb.UnionValue requires Type (UnionType) or explicit duckdb.NewUnionValue", duckdb.ErrInvalidInput)
+		}
+		return duckdb.NewUnionValue(x.Type, x.Tag, x.Value)
 	case time.Time:
 		return timeToDuckDBValue(x)
-	case driver.Valuer:
-		dv, err := x.Value()
-		if err != nil {
-			return duckdb.Value{}, err
-		}
-		if dv == nil {
+	}
+
+	// Unwrap nil pointers before checking driver.Valuer so nil *T maps to SQL NULL.
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
 			return duckdb.NullValue(), nil
 		}
-		if reflect.TypeOf(dv) == reflect.TypeOf(v) {
-			return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
+		if valuer, ok := v.(driver.Valuer); ok {
+			return valuerToDuckDBValue(valuer, v, depth)
 		}
-		return toDuckDBValue(dv)
+		return toDuckDBValueDepth(rv.Elem().Interface(), depth+1)
+	}
+
+	if valuer, ok := v.(driver.Valuer); ok {
+		return valuerToDuckDBValue(valuer, v, depth)
+	}
+
+	// Native Go slices (excluding []byte handled above) bind as DuckDB LIST.
+	if rv.Kind() == reflect.Slice {
+		if rv.IsNil() {
+			return duckdb.NullValue(), nil
+		}
+		return sliceToDuckDBList(rv, depth)
+	}
+
+	return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
+}
+
+func valuerToDuckDBValue(valuer driver.Valuer, orig any, depth int) (duckdb.Value, error) {
+	dv, err := valuer.Value()
+	if err != nil {
+		return duckdb.Value{}, err
+	}
+	if dv == nil {
+		return duckdb.NullValue(), nil
+	}
+	if reflect.TypeOf(dv) == reflect.TypeOf(orig) {
+		return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, orig)
+	}
+	return toDuckDBValueDepth(dv, depth+1)
+}
+
+func sliceToDuckDBList(rv reflect.Value, depth int) (duckdb.Value, error) {
+	n := rv.Len()
+	elemGoType := rv.Type().Elem()
+	elems := make([]duckdb.Value, n)
+	var inferred duckdb.LogicalType
+	for i := 0; i < n; i++ {
+		ev := rv.Index(i)
+		dv, err := toDuckDBValueDepth(ev.Interface(), depth+1)
+		if err != nil {
+			// Support slices of Go structs (e.g. []Address).
+			et := elemGoType
+			for et.Kind() == reflect.Ptr {
+				et = et.Elem()
+			}
+			if et.Kind() == reflect.Struct && !isDirectScalarStructType(et) {
+				st, stErr := encodeStructFromGo(ev, depth+1)
+				if stErr != nil {
+					return duckdb.Value{}, fmt.Errorf("slice[%d]: %w", i, stErr)
+				}
+				dv, err = duckdb.NewStructValue(st.Fields)
+			}
+			if err != nil {
+				return duckdb.Value{}, fmt.Errorf("slice[%d]: %w", i, err)
+			}
+		}
+		elems[i] = dv
+		if inferred.Kind == duckdb.TypeInvalid && !dv.IsNull() {
+			inferred = dv.Type()
+		}
+	}
+	if inferred.Kind == duckdb.TypeInvalid {
+		lt, err := inferLogicalTypeFromGoType(elemGoType, depth+1)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("%w: cannot infer DuckDB LIST element type for %s: %v", duckdb.ErrInvalidInput, rv.Type(), err)
+		}
+		inferred = lt
+	}
+	return duckdb.NewListValue(inferred, elems)
+}
+
+func isDirectScalarStructType(t reflect.Type) bool {
+	switch t {
+	case reflect.TypeFor[time.Time](),
+		reflect.TypeFor[duckdb.Value](),
+		reflect.TypeFor[duckdb.Hugeint](),
+		reflect.TypeFor[duckdb.Uhugeint](),
+		reflect.TypeFor[duckdb.Decimal](),
+		reflect.TypeFor[duckdb.Date](),
+		reflect.TypeFor[duckdb.Time](),
+		reflect.TypeFor[duckdb.TimeNS](),
+		reflect.TypeFor[duckdb.TimeTZ](),
+		reflect.TypeFor[duckdb.Timestamp](),
+		reflect.TypeFor[duckdb.Interval](),
+		reflect.TypeFor[duckdb.Enum](),
+		reflect.TypeFor[duckdb.Bit](),
+		reflect.TypeFor[duckdb.Bignum](),
+		reflect.TypeFor[duckdb.Geometry](),
+		reflect.TypeFor[duckdb.UnionValue](),
+		reflect.TypeFor[duckdb.ListValue](),
+		reflect.TypeFor[duckdb.ArrayValue](),
+		reflect.TypeFor[duckdb.StructValue](),
+		reflect.TypeFor[duckdb.MapValue](),
+		reflect.TypeFor[big.Int](),
+		reflect.TypeFor[sql.NullBool](),
+		reflect.TypeFor[sql.NullByte](),
+		reflect.TypeFor[sql.NullInt16](),
+		reflect.TypeFor[sql.NullInt32](),
+		reflect.TypeFor[sql.NullInt64](),
+		reflect.TypeFor[sql.NullFloat64](),
+		reflect.TypeFor[sql.NullString](),
+		reflect.TypeFor[sql.NullTime]():
+		return true
 	default:
-		return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
+		return false
+	}
+}
+
+func inferLogicalTypeFromGoType(t reflect.Type, depth int) (duckdb.LogicalType, error) {
+	if depth > 64 {
+		return duckdb.LogicalType{}, fmt.Errorf("%w: type nesting exceeds limit", duckdb.ErrLimitExceeded)
+	}
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t {
+	case reflect.TypeFor[[]byte]():
+		return duckdb.ScalarType(duckdb.TypeBlob), nil
+	case reflect.TypeFor[time.Time](), reflect.TypeFor[sql.NullTime]():
+		return duckdb.ScalarType(duckdb.TypeTimestampTZ), nil
+	case reflect.TypeFor[big.Int](), reflect.TypeFor[duckdb.Bignum]():
+		return duckdb.ScalarType(duckdb.TypeBignum), nil
+	case reflect.TypeFor[duckdb.Hugeint]():
+		return duckdb.ScalarType(duckdb.TypeHugeint), nil
+	case reflect.TypeFor[duckdb.Uhugeint]():
+		return duckdb.ScalarType(duckdb.TypeUhugeint), nil
+	case reflect.TypeFor[duckdb.UUID]():
+		return duckdb.ScalarType(duckdb.TypeUUID), nil
+	case reflect.TypeFor[duckdb.Date]():
+		return duckdb.ScalarType(duckdb.TypeDate), nil
+	case reflect.TypeFor[duckdb.Time]():
+		return duckdb.ScalarType(duckdb.TypeTime), nil
+	case reflect.TypeFor[duckdb.TimeNS]():
+		return duckdb.ScalarType(duckdb.TypeTimeNS), nil
+	case reflect.TypeFor[duckdb.TimeTZ]():
+		return duckdb.ScalarType(duckdb.TypeTimeTZ), nil
+	case reflect.TypeFor[duckdb.Interval]():
+		return duckdb.ScalarType(duckdb.TypeInterval), nil
+	case reflect.TypeFor[duckdb.Bit]():
+		return duckdb.ScalarType(duckdb.TypeBit), nil
+	case reflect.TypeFor[sql.NullBool]():
+		return duckdb.ScalarType(duckdb.TypeBoolean), nil
+	case reflect.TypeFor[sql.NullByte]():
+		return duckdb.ScalarType(duckdb.TypeUTinyint), nil
+	case reflect.TypeFor[sql.NullInt16]():
+		return duckdb.ScalarType(duckdb.TypeSmallint), nil
+	case reflect.TypeFor[sql.NullInt32]():
+		return duckdb.ScalarType(duckdb.TypeInteger), nil
+	case reflect.TypeFor[sql.NullInt64]():
+		return duckdb.ScalarType(duckdb.TypeBigint), nil
+	case reflect.TypeFor[sql.NullFloat64]():
+		return duckdb.ScalarType(duckdb.TypeDouble), nil
+	case reflect.TypeFor[sql.NullString]():
+		return duckdb.ScalarType(duckdb.TypeVarchar), nil
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return duckdb.ScalarType(duckdb.TypeBoolean), nil
+	case reflect.Int8:
+		return duckdb.ScalarType(duckdb.TypeTinyint), nil
+	case reflect.Int16:
+		return duckdb.ScalarType(duckdb.TypeSmallint), nil
+	case reflect.Int32:
+		return duckdb.ScalarType(duckdb.TypeInteger), nil
+	case reflect.Int, reflect.Int64:
+		return duckdb.ScalarType(duckdb.TypeBigint), nil
+	case reflect.Uint8:
+		return duckdb.ScalarType(duckdb.TypeUTinyint), nil
+	case reflect.Uint16:
+		return duckdb.ScalarType(duckdb.TypeUSmallint), nil
+	case reflect.Uint32:
+		return duckdb.ScalarType(duckdb.TypeUInteger), nil
+	case reflect.Uint, reflect.Uint64:
+		return duckdb.ScalarType(duckdb.TypeUBigint), nil
+	case reflect.Float32:
+		return duckdb.ScalarType(duckdb.TypeFloat), nil
+	case reflect.Float64:
+		return duckdb.ScalarType(duckdb.TypeDouble), nil
+	case reflect.String:
+		return duckdb.ScalarType(duckdb.TypeVarchar), nil
+	case reflect.Slice:
+		elem, err := inferLogicalTypeFromGoType(t.Elem(), depth+1)
+		if err != nil {
+			return duckdb.LogicalType{}, err
+		}
+		return duckdb.ListType(elem), nil
+	case reflect.Struct:
+		if isDirectScalarStructType(t) {
+			return duckdb.LogicalType{}, fmt.Errorf("%w: ambiguous logical type for %s", duckdb.ErrInvalidInput, t)
+		}
+		fields := make([]duckdb.StructFieldType, 0, t.NumField())
+		for i := 0; i < t.NumField(); i++ {
+			sf := t.Field(i)
+			if !sf.IsExported() {
+				continue
+			}
+			tag := sf.Tag.Get("db")
+			if tag == "-" {
+				continue
+			}
+			name := sf.Name
+			if tag != "" {
+				if n, _, _ := strings.Cut(tag, ","); n != "" {
+					name = n
+				}
+			}
+			ft, err := inferLogicalTypeFromGoType(sf.Type, depth+1)
+			if err != nil {
+				return duckdb.LogicalType{}, fmt.Errorf("field %q: %w", name, err)
+			}
+			fields = append(fields, duckdb.StructFieldType{Name: name, Type: ft})
+		}
+		if len(fields) == 0 {
+			return duckdb.LogicalType{}, fmt.Errorf("%w: struct %s has no exported fields", duckdb.ErrInvalidInput, t)
+		}
+		return duckdb.StructType(fields...), nil
+	default:
+		return duckdb.LogicalType{}, fmt.Errorf("%w: unsupported Go type %s", duckdb.ErrUnsupportedType, t)
 	}
 }
 
 func timeToDuckDBValue(t time.Time) (duckdb.Value, error) {
-	u := t.UTC()
-	if u.Nanosecond()%1000 != 0 {
-		return duckdb.Value{}, fmt.Errorf("%w: time.Time %s has sub-microsecond precision; truncate to microseconds or pass duckdb.Timestamp{Unit: duckdb.TimestampUnitNanos}", duckdb.ErrInvalidInput, u.Format(time.RFC3339Nano))
+	ts, err := duckdb.TimestampFromTime(t, duckdb.TimestampUnitTZ)
+	if err != nil {
+		return duckdb.Value{}, err
 	}
-	sec := u.Unix()
-	const maxMicrosSec = (1<<63 - 1) / 1_000_000
-	const minMicrosSec = -(1 << 63) / 1_000_000
-	if sec > maxMicrosSec || sec < minMicrosSec {
-		return duckdb.Value{}, fmt.Errorf("%w: time.Time %s overflows TIMESTAMPTZ microsecond range", duckdb.ErrOutOfRange, u.Format(time.RFC3339Nano))
-	}
-	micros := sec*1_000_000 + int64(u.Nanosecond()/1000)
-	return duckdb.TimestampValue(duckdb.Timestamp{Value: micros, Unit: duckdb.TimestampUnitTZ})
+	return duckdb.TimestampValue(ts)
 }
 
 func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
@@ -158,10 +399,7 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 			return nil, err
 		}
 		if scanTime {
-			if !d.IsFinite() {
-				return nil, fmt.Errorf("%w: non-finite DATE (%d) cannot be scanned into time.Time", duckdb.ErrOutOfRange, d.Days)
-			}
-			return time.Unix(int64(d.Days)*86400, 0).UTC(), nil
+			return d.Time()
 		}
 		return d, nil
 	case duckdb.TypeTime:
@@ -176,7 +414,7 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 			return nil, err
 		}
 		if scanTime {
-			return timestampToTime(ts)
+			return ts.Time()
 		}
 		return ts, nil
 	case duckdb.TypeInterval:
@@ -203,24 +441,6 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 		return v.Union()
 	default:
 		return nil, fmt.Errorf("%w: %s", duckdb.ErrUnsupportedType, v.Kind())
-	}
-}
-
-func timestampToTime(ts duckdb.Timestamp) (time.Time, error) {
-	if !ts.IsFinite() {
-		return time.Time{}, fmt.Errorf("%w: non-finite TIMESTAMP (%d) cannot be scanned into time.Time", duckdb.ErrOutOfRange, ts.Value)
-	}
-	switch ts.Unit {
-	case duckdb.TimestampUnitSeconds:
-		return time.Unix(ts.Value, 0).UTC(), nil
-	case duckdb.TimestampUnitMillis:
-		return time.UnixMilli(ts.Value).UTC(), nil
-	case duckdb.TimestampUnitMicros, duckdb.TimestampUnitTZ:
-		return time.UnixMicro(ts.Value).UTC(), nil
-	case duckdb.TimestampUnitNanos:
-		return time.Unix(0, ts.Value).UTC(), nil
-	default:
-		return time.Time{}, fmt.Errorf("%w: unknown timestamp unit %d", duckdb.ErrInvalidInput, ts.Unit)
 	}
 }
 

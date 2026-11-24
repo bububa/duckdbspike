@@ -315,3 +315,172 @@ func (l *Library) ConfigFlags() ([]ConfigFlag, error) {
 	}
 	return flags, nil
 }
+
+// ConfigOptionScope reports the scope from which a DuckDB runtime configuration
+// option was resolved.
+type ConfigOptionScope int32
+
+const (
+	ConfigOptionScopeInvalid ConfigOptionScope = ConfigOptionScope(abi.ConfigOptionScopeInvalid)
+	ConfigOptionScopeLocal   ConfigOptionScope = ConfigOptionScope(abi.ConfigOptionScopeLocal)
+	ConfigOptionScopeSession ConfigOptionScope = ConfigOptionScope(abi.ConfigOptionScopeSession)
+	ConfigOptionScopeGlobal  ConfigOptionScope = ConfigOptionScope(abi.ConfigOptionScopeGlobal)
+)
+
+// String returns a human-readable scope name.
+func (s ConfigOptionScope) String() string {
+	switch s {
+	case ConfigOptionScopeInvalid:
+		return "INVALID"
+	case ConfigOptionScopeLocal:
+		return "LOCAL"
+	case ConfigOptionScopeSession:
+		return "SESSION"
+	case ConfigOptionScopeGlobal:
+		return "GLOBAL"
+	default:
+		return fmt.Sprintf("CONFIG_OPTION_SCOPE(%d)", int32(s))
+	}
+}
+
+// ConfigOptionValue holds the strongly-typed value and effective scope of a
+// runtime DuckDB configuration option retrieved via Conn.ConfigOption.
+type ConfigOptionValue struct {
+	Value Value
+	Scope ConfigOptionScope
+}
+
+// ConnectionID returns DuckDB's unique connection identifier for c.
+func (c *Conn) ConnectionID() (uint64, error) {
+	if c == nil {
+		return 0, ErrClosed
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.usableLocked(); err != nil {
+		return 0, err
+	}
+	api := c.api
+	var clientCtx uintptr
+	api.ConnectionGetClientContext(c.handle, &clientCtx)
+	if clientCtx == 0 {
+		return 0, nativeError("connection_get_client_context", abi.ErrorInvalid, "")
+	}
+	defer api.DestroyClientContext(&clientCtx)
+	return api.ClientContextGetConnectionID(clientCtx), nil
+}
+
+// ConfigOption retrieves the current strongly-typed value and scope of the
+// configuration option named name on c without running a SQL query. When name
+// does not match any known option, ok is false and err is nil.
+func (c *Conn) ConfigOption(name string) (ConfigOptionValue, bool, error) {
+	if c == nil {
+		return ConfigOptionValue{}, false, ErrClosed
+	}
+	if name == "" {
+		return ConfigOptionValue{}, false, fmt.Errorf("%w: config option name must not be empty", ErrInvalidInput)
+	}
+	cname, err := abi.CString(name)
+	if err != nil {
+		return ConfigOptionValue{}, false, fmt.Errorf("%w: config option name: %v", ErrInvalidInput, err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.usableLocked(); err != nil {
+		return ConfigOptionValue{}, false, err
+	}
+	api := c.api
+	var clientCtx uintptr
+	api.ConnectionGetClientContext(c.handle, &clientCtx)
+	if clientCtx == 0 {
+		return ConfigOptionValue{}, false, nativeError("connection_get_client_context", abi.ErrorInvalid, "")
+	}
+	defer api.DestroyClientContext(&clientCtx)
+
+	var scope int32
+	valHandle := api.ClientContextGetConfigOption(clientCtx, &cname[0], &scope)
+	runtime.KeepAlive(cname)
+	if valHandle == 0 || scope == abi.ConfigOptionScopeInvalid {
+		if valHandle != 0 {
+			api.DestroyValue(&valHandle)
+		}
+		return ConfigOptionValue{Scope: ConfigOptionScopeInvalid}, false, nil
+	}
+	defer api.DestroyValue(&valHandle)
+
+	val, err := decodeNativeValue(api, valHandle, 0, c.limits)
+	if err != nil {
+		return ConfigOptionValue{}, true, fmt.Errorf("config option %q: %w", name, err)
+	}
+	return ConfigOptionValue{
+		Value: val,
+		Scope: ConfigOptionScope(scope),
+	}, true, nil
+}
+
+// TableNames parses sql without executing it and returns the table names
+// referenced by the query. When qualified is true, DuckDB returns fully
+// qualified catalog.schema.table names.
+func (c *Conn) TableNames(ctx context.Context, sql string, qualified bool) ([]string, error) {
+	return c.tableNamesWithTx(ctx, nil, sql, qualified)
+}
+
+// TableNames parses sql without executing it within tx and returns the
+// referenced table names.
+func (t *Tx) TableNames(ctx context.Context, sql string, qualified bool) ([]string, error) {
+	if t == nil {
+		return nil, ErrTxDone
+	}
+	return t.conn.tableNamesWithTx(ctx, t, sql, qualified)
+}
+
+func (c *Conn) tableNamesWithTx(ctx context.Context, tx *Tx, sql string, qualified bool) ([]string, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	csql, err := abi.CString(sql)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sql: %v", ErrInvalidInput, err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
+	if err := c.usableLocked(); err != nil {
+		return nil, err
+	}
+	api := c.api
+	listVal := api.GetTableNames(c.handle, &csql[0], qualified)
+	runtime.KeepAlive(csql)
+	if listVal == 0 {
+		return nil, nativeError("get_table_names", abi.ErrorParser, "failed to parse SQL for table names")
+	}
+	defer api.DestroyValue(&listVal)
+
+	n := api.GetListSize(listVal)
+	if n > c.limits.MaxCollectionLen || n > math.MaxInt {
+		return nil, fmt.Errorf("%w: table name count %d exceeds %d", ErrLimitExceeded, n, c.limits.MaxCollectionLen)
+	}
+	names := make([]string, 0, int(n))
+	for i := uint64(0); i < n; i++ {
+		elem := api.GetListChild(listVal, i)
+		if elem == 0 {
+			continue
+		}
+		ptr := api.GetVarchar(elem)
+		name := abi.GoString(ptr)
+		if ptr != 0 {
+			api.Free(ptr)
+		}
+		api.DestroyValue(&elem)
+		names = append(names, name)
+	}
+	return names, nil
+}

@@ -283,6 +283,8 @@ int main(void) {
 	S(struct ArrowArray);
 	O(struct ArrowArray, release);
 	O(struct ArrowArray, private_data);
+	S(duckdb_blob);
+	O(duckdb_blob, size);
 	S(duckdb_bit);
 	O(duckdb_bit, size);
 	S(duckdb_bignum);
@@ -339,6 +341,8 @@ int main(void) {
 		fmt.Sprintf("size struct ArrowArray %d %d", unsafe.Sizeof(ArrowArray{}), unsafe.Alignof(ArrowArray{})),
 		fmt.Sprintf("off struct ArrowArray.release %d", unsafe.Offsetof(ArrowArray{}.Release)),
 		fmt.Sprintf("off struct ArrowArray.private_data %d", unsafe.Offsetof(ArrowArray{}.PrivateData)),
+		fmt.Sprintf("size duckdb_blob %d %d", unsafe.Sizeof(Blob{}), unsafe.Alignof(Blob{})),
+		fmt.Sprintf("off duckdb_blob.size %d", unsafe.Offsetof(Blob{}.Size)),
 		fmt.Sprintf("size duckdb_bit %d %d", unsafe.Sizeof(Bit{}), unsafe.Alignof(Bit{})),
 		fmt.Sprintf("off duckdb_bit.size %d", unsafe.Offsetof(Bit{}.Size)),
 		fmt.Sprintf("size duckdb_bignum %d %d", unsafe.Sizeof(Bignum{}), unsafe.Alignof(Bignum{})),
