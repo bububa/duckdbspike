@@ -486,6 +486,13 @@ func (r *Rows) advanceScriptResultLocked() bool {
 			r.result = result
 			r.columns = columns
 			r.plans = plans
+			if api.ResultStatementType != nil {
+				r.stmtType = StatementType(api.ResultStatementType(result))
+			} else if api.PreparedStatementType != nil {
+				r.stmtType = StatementType(api.PreparedStatementType(s.handle))
+			} else {
+				r.stmtType = StatementTypeInvalid
+			}
 			r.chunk = 0
 			r.chunkSize = 0
 			r.rowIdx = 0

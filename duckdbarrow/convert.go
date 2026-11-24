@@ -222,6 +222,37 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 			return nil, err
 		}
 		return arrow.LargeListOfField(elem), nil
+	case "+vl":
+		if v.ChildCount() != 1 {
+			return nil, fmt.Errorf("%w: list view schema expects 1 child, got %d", duckdb.ErrInvalidInput, v.ChildCount())
+		}
+		elem, err := importField(v.Child(0), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return arrow.ListViewOfField(elem), nil
+	case "+vL":
+		if v.ChildCount() != 1 {
+			return nil, fmt.Errorf("%w: large list view schema expects 1 child, got %d", duckdb.ErrInvalidInput, v.ChildCount())
+		}
+		elem, err := importField(v.Child(0), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return arrow.LargeListViewOfField(elem), nil
+	case "+r":
+		if v.ChildCount() != 2 {
+			return nil, fmt.Errorf("%w: run-end encoded schema expects 2 children, got %d", duckdb.ErrInvalidInput, v.ChildCount())
+		}
+		runEndsField, err := importField(v.Child(0), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		valuesField, err := importField(v.Child(1), depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return arrow.RunEndEncodedOf(runEndsField.Type, valuesField.Type), nil
 	case "+s":
 		n := v.ChildCount()
 		fields := make([]arrow.Field, n)
@@ -277,6 +308,10 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 			}
 		}
 		switch bits {
+		case 32:
+			return &arrow.Decimal32Type{Precision: int32(prec), Scale: int32(scale)}, nil
+		case 64:
+			return &arrow.Decimal64Type{Precision: int32(prec), Scale: int32(scale)}, nil
 		case 128:
 			return &arrow.Decimal128Type{Precision: int32(prec), Scale: int32(scale)}, nil
 		case 256:
@@ -578,6 +613,62 @@ func importArrayData(dt arrow.DataType, v duckdb.ArrowArrayView, alloc memory.Al
 		children := []arrow.ArrayData{childData}
 		data := array.NewData(dt, length, bufs, children, nulls, offset)
 		releaseBuffers(bufs)
+		releaseChildren(children)
+		return data, nil
+
+	case *arrow.ListViewType:
+		if v.BufferCount() < 3 || v.ChildCount() != 1 {
+			return nil, fmt.Errorf("%w: list view array invalid buffers/children", duckdb.ErrInvalidInput)
+		}
+		childData, err := importArrayData(t.Elem(), v.Child(0), alloc, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		bufs := []*memory.Buffer{
+			copyBuffer(alloc, v.Buffer(0), int(bitutil.BytesForBits(int64(total)))),
+			copyBuffer(alloc, v.Buffer(1), total*4),
+			copyBuffer(alloc, v.Buffer(2), total*4),
+		}
+		children := []arrow.ArrayData{childData}
+		data := array.NewData(dt, length, bufs, children, nulls, offset)
+		releaseBuffers(bufs)
+		releaseChildren(children)
+		return data, nil
+
+	case *arrow.LargeListViewType:
+		if v.BufferCount() < 3 || v.ChildCount() != 1 {
+			return nil, fmt.Errorf("%w: large list view array invalid buffers/children", duckdb.ErrInvalidInput)
+		}
+		childData, err := importArrayData(t.Elem(), v.Child(0), alloc, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		bufs := []*memory.Buffer{
+			copyBuffer(alloc, v.Buffer(0), int(bitutil.BytesForBits(int64(total)))),
+			copyBuffer(alloc, v.Buffer(1), total*8),
+			copyBuffer(alloc, v.Buffer(2), total*8),
+		}
+		children := []arrow.ArrayData{childData}
+		data := array.NewData(dt, length, bufs, children, nulls, offset)
+		releaseBuffers(bufs)
+		releaseChildren(children)
+		return data, nil
+
+	case *arrow.RunEndEncodedType:
+		if v.ChildCount() != 2 {
+			return nil, fmt.Errorf("%w: run-end encoded array expects 2 children, got %d", duckdb.ErrInvalidInput, v.ChildCount())
+		}
+		runEndsData, err := importArrayData(t.RunEnds(), v.Child(0), alloc, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		valuesData, err := importArrayData(t.Encoded(), v.Child(1), alloc, depth+1)
+		if err != nil {
+			runEndsData.Release()
+			return nil, err
+		}
+		children := []arrow.ArrayData{runEndsData, valuesData}
+		data := array.NewData(dt, length, nil, children, 0, offset)
 		releaseChildren(children)
 		return data, nil
 

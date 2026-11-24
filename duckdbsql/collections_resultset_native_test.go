@@ -192,4 +192,24 @@ func TestNativeMapArrayBindingsEnumValuerAndNextResultSet(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("rows.Err = %v", err)
 	}
+
+	// 5. driver.RowsColumnTypeLength on VARCHAR/BLOB (unbounded) vs INTEGER (not applicable).
+	ctRows, err := db.QueryContext(ctx, `SELECT 'abc'::VARCHAR AS s, '\x01'::BLOB AS b, 42::INTEGER AS n`)
+	if err != nil {
+		t.Fatalf("ColumnTypeLength query: %v", err)
+	}
+	defer ctRows.Close()
+	cts, err := ctRows.ColumnTypes()
+	if err != nil || len(cts) != 3 {
+		t.Fatalf("ColumnTypes = %v (%v)", cts, err)
+	}
+	if l0, ok0 := cts[0].Length(); !ok0 || l0 <= 0 {
+		t.Fatalf("VARCHAR Length() = (%d, %v), want (MaxInt64, true)", l0, ok0)
+	}
+	if l1, ok1 := cts[1].Length(); !ok1 || l1 <= 0 {
+		t.Fatalf("BLOB Length() = (%d, %v), want (MaxInt64, true)", l1, ok1)
+	}
+	if l2, ok2 := cts[2].Length(); ok2 || l2 != 0 {
+		t.Fatalf("INTEGER Length() = (%d, %v), want (0, false)", l2, ok2)
+	}
 }

@@ -235,14 +235,15 @@ type API struct {
 
 	// DestroyResult releases a result filled by ExecutePending, on success or
 	// failure. ResultError and ColumnName are borrowed from the result.
-	DestroyResult     func(result *Result)
-	ResultError       func(result *Result) uintptr
-	ResultErrorType   func(result *Result) int32
-	ResultIsStreaming func(result Result) bool
-	ResultReturnType  func(result Result) int32
-	RowsChanged       func(result *Result) uint64
-	ColumnCount       func(result *Result) uint64
-	ColumnName        func(result *Result, column uint64) uintptr
+	DestroyResult       func(result *Result)
+	ResultError         func(result *Result) uintptr
+	ResultErrorType     func(result *Result) int32
+	ResultIsStreaming   func(result Result) bool
+	ResultReturnType    func(result Result) int32
+	ResultStatementType func(result Result) int32
+	RowsChanged         func(result *Result) uint64
+	ColumnCount         func(result *Result) uint64
+	ColumnName          func(result *Result, column uint64) uintptr
 	// ColumnLogicalType returns an owned logical type.
 	ColumnLogicalType func(result *Result, column uint64) uintptr
 	// FetchChunk returns an owned chunk released by DestroyDataChunk, or 0 at
@@ -586,6 +587,7 @@ func (a *API) symbols() []symbol {
 		{&a.ResultErrorType, "duckdb_result_error_type"},
 		{&a.ResultIsStreaming, "duckdb_result_is_streaming"},
 		{&a.ResultReturnType, "duckdb_result_return_type"},
+		{&a.ResultStatementType, "duckdb_result_statement_type"},
 		{&a.RowsChanged, "duckdb_rows_changed"},
 		{&a.ColumnCount, "duckdb_column_count"},
 		{&a.ColumnName, "duckdb_column_name"},

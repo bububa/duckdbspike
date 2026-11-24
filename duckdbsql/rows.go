@@ -3,6 +3,7 @@ package duckdbsql
 import (
 	"database/sql/driver"
 	"io"
+	"math"
 	"reflect"
 
 	"github.com/bububa/duckdbspike/duckdb"
@@ -20,6 +21,7 @@ var (
 	_ driver.RowsNextResultSet              = (*sqlRows)(nil)
 	_ driver.RowsColumnTypeDatabaseTypeName = (*sqlRows)(nil)
 	_ driver.RowsColumnTypeScanType         = (*sqlRows)(nil)
+	_ driver.RowsColumnTypeLength           = (*sqlRows)(nil)
 	_ driver.RowsColumnTypePrecisionScale   = (*sqlRows)(nil)
 	_ driver.RowsColumnTypeNullable         = (*sqlRows)(nil)
 )
@@ -78,6 +80,18 @@ func (r *sqlRows) ColumnTypeScanType(index int) reflect.Type {
 		return reflect.TypeFor[any]()
 	}
 	return scanTypeForLogicalType(r.columns[index].Type, r.scanTime)
+}
+
+func (r *sqlRows) ColumnTypeLength(index int) (length int64, ok bool) {
+	if index < 0 || index >= len(r.columns) {
+		return 0, false
+	}
+	switch r.columns[index].Type.Kind {
+	case duckdb.TypeVarchar, duckdb.TypeBlob, duckdb.TypeBit, duckdb.TypeBignum, duckdb.TypeGeometry:
+		return math.MaxInt64, true
+	default:
+		return 0, false
+	}
 }
 
 func (r *sqlRows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {

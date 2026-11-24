@@ -72,6 +72,69 @@ func (c *Conn) ProfilingInfo() (*ProfilingInfo, error) {
 	return snapshotProfilingNode(c.api, root, 0, c.limits)
 }
 
+// ProfilingMetric retrieves a single metric value by key from the root
+// profiling node for the last profiled query on c without snapshotting child
+// operator nodes. Returns ("", false, nil) when profiling is disabled or the
+// metric key does not exist. Returns ErrBusy while a cursor or appender is open
+// on c.
+//
+// Note: DuckDB v1.5.6's duckdb_profiling_info_get_value throws an uncaught C++
+// exception (aborting the process) on unrecognized metric names, so
+// ProfilingMetric safely inspects the root node's metrics map via
+// duckdb_profiling_info_get_metrics instead.
+func (c *Conn) ProfilingMetric(key string) (string, bool, error) {
+	if c == nil {
+		return "", false, ErrClosed
+	}
+	if key == "" {
+		return "", false, fmt.Errorf("%w: profiling metric key must not be empty", ErrInvalidInput)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.usableLocked(); err != nil {
+		return "", false, err
+	}
+	api := c.api
+	root := api.GetProfilingInfo(c.handle)
+	if root == 0 {
+		return "", false, nil
+	}
+	metricsVal := api.ProfilingInfoGetMetrics(root)
+	if metricsVal == 0 {
+		return "", false, nil
+	}
+	defer api.DestroyValue(&metricsVal)
+	n := api.GetMapSize(metricsVal)
+	if n > c.limits.MaxCollectionLen || n > math.MaxInt {
+		return "", false, fmt.Errorf("%w: profiling metrics count %d exceeds %d", ErrLimitExceeded, n, c.limits.MaxCollectionLen)
+	}
+	for i := uint64(0); i < n; i++ {
+		kVal := api.GetMapKey(metricsVal, i)
+		var kStr string
+		if kVal != 0 {
+			if p := api.GetVarchar(kVal); p != 0 {
+				kStr = abi.GoString(p)
+				api.Free(p)
+			}
+			api.DestroyValue(&kVal)
+		}
+		if kStr != key {
+			continue
+		}
+		vVal := api.GetMapValue(metricsVal, i)
+		var vStr string
+		if vVal != 0 {
+			if p := api.GetVarchar(vVal); p != 0 {
+				vStr = abi.GoString(p)
+				api.Free(p)
+			}
+			api.DestroyValue(&vVal)
+		}
+		return vStr, true, nil
+	}
+	return "", false, nil
+}
+
 func snapshotProfilingNode(api *abi.API, node uintptr, depth int, limits DecodeLimits) (*ProfilingInfo, error) {
 	if depth > maxProfilingDepth {
 		return nil, fmt.Errorf("%w: profiling tree depth %d exceeds %d", ErrLimitExceeded, depth, maxProfilingDepth)

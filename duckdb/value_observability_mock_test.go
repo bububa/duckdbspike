@@ -449,6 +449,7 @@ func TestObservabilityMockProgressJoinAndProfilingZeroLeaks(t *testing.T) {
 		var rootNode uintptr
 
 		api.GetProfilingInfo = func(conn uintptr) uintptr { return rootNode }
+		api.ResultStatementType = func(res abi.Result) int32 { return abi.StatementTypeSelect }
 		api.ProfilingInfoGetMetrics = func(info uintptr) uintptr {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -499,23 +500,35 @@ func TestObservabilityMockProgressJoinAndProfilingZeroLeaks(t *testing.T) {
 		db, _ := lib.Open(ctx, ":memory:")
 		conn, _ := db.Connect(ctx)
 
-		// Profiling disabled -> (nil, nil).
+		// Profiling disabled -> (nil, nil) and ("", false, nil).
 		if info, err := conn.ProfilingInfo(); err != nil || info != nil {
 			t.Fatalf("disabled ProfilingInfo = (%+v, %v), want (nil, nil)", info, err)
 		}
+		if v, ok, err := conn.ProfilingMetric("latency"); err != nil || ok || v != "" {
+			t.Fatalf("disabled ProfilingMetric = (%q, %v, %v)", v, ok, err)
+		}
 
-		// Busy while Rows is open -> ErrBusy.
+		// Busy while Rows is open -> ErrBusy; Rows.StatementType reports SELECT.
 		f.resultColumns = []string{"x"}
 		rows, err := conn.Query(ctx, "SELECT 1")
 		if err != nil {
 			t.Fatal(err)
 		}
+		if got := rows.StatementType(); got != StatementTypeSelect {
+			t.Fatalf("rows.StatementType() = %v, want SELECT", got)
+		}
 		if _, err := conn.ProfilingInfo(); !errors.Is(err, ErrBusy) {
 			t.Fatalf("busy ProfilingInfo = %v, want ErrBusy", err)
 		}
+		if _, _, err := conn.ProfilingMetric("latency"); !errors.Is(err, ErrBusy) {
+			t.Fatalf("busy ProfilingMetric = %v, want ErrBusy", err)
+		}
 		_ = rows.Close()
+		if got := rows.StatementType(); got != StatementTypeSelect {
+			t.Fatalf("post-close rows.StatementType() = %v, want SELECT", got)
+		}
 
-		// Enabled -> full owned tree snapshot.
+		// Enabled -> full owned tree snapshot + single-metric ProfilingMetric lookup.
 		rootNode = 100
 		info, err := conn.ProfilingInfo()
 		if err != nil || info == nil {
@@ -523,6 +536,15 @@ func TestObservabilityMockProgressJoinAndProfilingZeroLeaks(t *testing.T) {
 		}
 		if info.Metrics["query_name"] != "SELECT 1" || len(info.Children) != 1 || info.Children[0].Metrics["operator_type"] != "PROJECTION" {
 			t.Fatalf("unexpected profiling snapshot: %+v", info)
+		}
+		if v, ok, err := conn.ProfilingMetric("latency"); err != nil || !ok || v != "0.001" {
+			t.Fatalf("ProfilingMetric('latency') = (%q, %v, %v)", v, ok, err)
+		}
+		if v, ok, err := conn.ProfilingMetric("missing"); err != nil || ok || v != "" {
+			t.Fatalf("ProfilingMetric('missing') = (%q, %v, %v)", v, ok, err)
+		}
+		if _, _, err := conn.ProfilingMetric(""); !errors.Is(err, ErrInvalidInput) {
+			t.Fatalf("empty ProfilingMetric = %v, want ErrInvalidInput", err)
 		}
 
 		// Post-close -> ErrClosed.

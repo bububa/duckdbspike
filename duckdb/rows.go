@@ -30,6 +30,7 @@ type Rows struct {
 	plans        []columnPlan
 	limits       DecodeLimits
 	resultLimits ResultLimits
+	stmtType     StatementType
 	rowsAffected uint64
 	rowsRead     uint64
 	bytesRead    uint64
@@ -58,6 +59,15 @@ func (r *Rows) RowsAffected() uint64 {
 		return 0
 	}
 	return r.rowsAffected
+}
+
+// StatementType returns the SQL statement category (SELECT, EXPLAIN, PRAGMA,
+// etc.) for the current result set, remaining readable after Close.
+func (r *Rows) StatementType() StatementType {
+	if r == nil {
+		return StatementTypeInvalid
+	}
+	return r.stmtType
 }
 
 // Next advances the cursor by one row, streaming one native chunk at a time.

@@ -316,6 +316,12 @@ func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error)
 		api.DestroyResult(&result)
 		return nil, cerr
 	}
+	var stmtType StatementType
+	if api.ResultStatementType != nil {
+		stmtType = StatementType(api.ResultStatementType(result))
+	} else if api.PreparedStatementType != nil {
+		stmtType = StatementType(api.PreparedStatementType(s.handle))
+	}
 	rows := &Rows{
 		conn:         s.conn,
 		stmt:         s,
@@ -325,6 +331,7 @@ func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error)
 		plans:        plans,
 		limits:       limits,
 		resultLimits: s.conn.resultLimits,
+		stmtType:     stmtType,
 		rowsAffected: api.RowsChanged(&result),
 	}
 	s.rows = rows

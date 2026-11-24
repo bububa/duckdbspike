@@ -166,6 +166,10 @@ func exportDataTypeSpec(dt arrow.DataType, depth int) (duckdb.ArrowSchemaSpec, e
 		return duckdb.ArrowSchemaSpec{Format: "vu"}, nil
 	case *arrow.FixedSizeBinaryType:
 		return duckdb.ArrowSchemaSpec{Format: fmt.Sprintf("w:%d", t.ByteWidth)}, nil
+	case *arrow.Decimal32Type:
+		return duckdb.ArrowSchemaSpec{Format: fmt.Sprintf("d:%d,%d,32", t.Precision, t.Scale)}, nil
+	case *arrow.Decimal64Type:
+		return duckdb.ArrowSchemaSpec{Format: fmt.Sprintf("d:%d,%d,64", t.Precision, t.Scale)}, nil
 	case *arrow.Decimal128Type:
 		return duckdb.ArrowSchemaSpec{Format: fmt.Sprintf("d:%d,%d", t.Precision, t.Scale)}, nil
 	case *arrow.Decimal256Type:
@@ -261,6 +265,38 @@ func exportDataTypeSpec(dt arrow.DataType, depth int) (duckdb.ArrowSchemaSpec, e
 		return duckdb.ArrowSchemaSpec{
 			Format:   "+L",
 			Children: []duckdb.ArrowSchemaSpec{elem},
+		}, nil
+	case *arrow.ListViewType:
+		elem, err := exportFieldSpec(t.ElemField(), depth+1)
+		if err != nil {
+			return duckdb.ArrowSchemaSpec{}, err
+		}
+		return duckdb.ArrowSchemaSpec{
+			Format:   "+vl",
+			Children: []duckdb.ArrowSchemaSpec{elem},
+		}, nil
+	case *arrow.LargeListViewType:
+		elem, err := exportFieldSpec(t.ElemField(), depth+1)
+		if err != nil {
+			return duckdb.ArrowSchemaSpec{}, err
+		}
+		return duckdb.ArrowSchemaSpec{
+			Format:   "+vL",
+			Children: []duckdb.ArrowSchemaSpec{elem},
+		}, nil
+	case *arrow.RunEndEncodedType:
+		fields := t.Fields()
+		children := make([]duckdb.ArrowSchemaSpec, len(fields))
+		for i, sf := range fields {
+			cs, err := exportFieldSpec(sf, depth+1)
+			if err != nil {
+				return duckdb.ArrowSchemaSpec{}, fmt.Errorf("run-end encoded field %d (%q): %w", i, sf.Name, err)
+			}
+			children[i] = cs
+		}
+		return duckdb.ArrowSchemaSpec{
+			Format:   "+r",
+			Children: children,
 		}, nil
 	case *arrow.FixedSizeListType:
 		elem, err := exportFieldSpec(t.ElemField(), depth+1)
@@ -447,6 +483,40 @@ func exportArrayDataSpec(data arrow.ArrayData, depth int) (duckdb.ArrowArraySpec
 			getBuf(1, true),
 		}
 		spec.Children = []duckdb.ArrowArraySpec{child}
+		return spec, nil
+
+	case *arrow.ListViewType, *arrow.LargeListViewType:
+		if len(data.Children()) != 1 {
+			return duckdb.ArrowArraySpec{}, fmt.Errorf("%w: %s expects 1 child, got %d", duckdb.ErrInvalidInput, dt, len(data.Children()))
+		}
+		child, err := exportArrayDataSpec(data.Children()[0], depth+1)
+		if err != nil {
+			return duckdb.ArrowArraySpec{}, err
+		}
+		spec.Buffers = [][]byte{
+			getBuf(0, false),
+			getBuf(1, true),
+			getBuf(2, true),
+		}
+		spec.Children = []duckdb.ArrowArraySpec{child}
+		return spec, nil
+
+	case *arrow.RunEndEncodedType:
+		kids := data.Children()
+		if len(kids) != 2 {
+			return duckdb.ArrowArraySpec{}, fmt.Errorf("%w: run-end encoded expects 2 children, got %d", duckdb.ErrInvalidInput, len(kids))
+		}
+		runEnds, err := exportArrayDataSpec(kids[0], depth+1)
+		if err != nil {
+			return duckdb.ArrowArraySpec{}, fmt.Errorf("run_ends: %w", err)
+		}
+		vals, err := exportArrayDataSpec(kids[1], depth+1)
+		if err != nil {
+			return duckdb.ArrowArraySpec{}, fmt.Errorf("values: %w", err)
+		}
+		spec.NullCount = 0
+		spec.Buffers = nil
+		spec.Children = []duckdb.ArrowArraySpec{runEnds, vals}
 		return spec, nil
 
 	case *arrow.FixedSizeListType:

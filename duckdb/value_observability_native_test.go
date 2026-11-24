@@ -509,6 +509,41 @@ func TestNativeQueryProgressAndProfilingInfo(t *testing.T) {
 		t.Fatalf("expected operator children in profiling tree, got 0")
 	}
 
+	// ProfilingMetric fetches a single root metric cleanly and returns (false, nil) for unknown keys.
+	var sampleKey string
+	for k := range info.Metrics {
+		sampleKey = k
+		break
+	}
+	if val, ok, err := conn.ProfilingMetric(sampleKey); err != nil || !ok || val != info.Metrics[sampleKey] {
+		t.Fatalf("ProfilingMetric(%q) = (%q, %v, %v), want %q", sampleKey, val, ok, err, info.Metrics[sampleKey])
+	}
+	if val, ok, err := conn.ProfilingMetric("definitely_not_a_metric_key"); err != nil || ok || val != "" {
+		t.Fatalf("ProfilingMetric(unknown) = (%q, %v, %v), want ('', false, nil)", val, ok, err)
+	}
+
+	// Rows.StatementType reports SELECT and updates across NextResultSet (SELECT -> EXPLAIN).
+	stRows, err := conn.QueryScript(ctx, "SELECT 1; EXPLAIN SELECT 1;")
+	if err != nil {
+		t.Fatalf("QueryScript statement types: %v", err)
+	}
+	if got := stRows.StatementType(); got != duckdb.StatementTypeSelect {
+		_ = stRows.Close()
+		t.Fatalf("rs1 StatementType = %v, want SELECT", got)
+	}
+	if !stRows.NextResultSet() {
+		_ = stRows.Close()
+		t.Fatalf("NextResultSet to EXPLAIN failed: %v", stRows.Err())
+	}
+	if got := stRows.StatementType(); got != duckdb.StatementTypeExplain {
+		_ = stRows.Close()
+		t.Fatalf("rs2 StatementType = %v, want EXPLAIN", got)
+	}
+	_ = stRows.Close()
+	if got := stRows.StatementType(); got != duckdb.StatementTypeExplain {
+		t.Fatalf("post-close StatementType = %v, want EXPLAIN", got)
+	}
+
 	// Snapshot remains readable after closing the connection.
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
