@@ -179,8 +179,8 @@ func (s *Stmt) bindOneLocked(idx uint64, arg Value) error {
 				Micros: int64(arg.lo),
 			})
 		case TypeTimestampS, TypeTimestampMS, TypeTimestampNS, TypeTimeNS,
-			TypeTimeTZ, TypeUUID, TypeEnum,
-			TypeList, TypeArray, TypeStruct, TypeMap:
+			TypeTimeTZ, TypeUUID, TypeEnum, TypeBit, TypeBignum,
+			TypeList, TypeArray, TypeStruct, TypeMap, TypeUnion:
 			nv, err := createNativeValue(api, arg, 0, s.conn.limits)
 			if err != nil {
 				return err
@@ -254,9 +254,28 @@ func abiTypeIDForScalar(k TypeKind) (int32, bool) {
 		return abi.TypeUUID, true
 	case TypeSQLNull:
 		return abi.TypeSQLNull, true
+	case TypeBit:
+		return abi.TypeBit, true
+	case TypeBignum:
+		return abi.TypeBignum, true
+	case TypeGeometry:
+		return abi.TypeGeometry, true
 	default:
 		return abi.TypeInvalid, false
 	}
+}
+
+func applyLogicalTypeAlias(api *abi.API, h uintptr, alias string) error {
+	if h == 0 || alias == "" || api.LogicalTypeSetAlias == nil {
+		return nil
+	}
+	calias, err := abi.CString(alias)
+	if err != nil {
+		return fmt.Errorf("%w: logical type alias %q: %v", ErrInvalidInput, alias, err)
+	}
+	api.LogicalTypeSetAlias(h, &calias[0])
+	runtime.KeepAlive(calias)
+	return nil
 }
 
 func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits DecodeLimits) (uintptr, error) {
@@ -267,6 +286,10 @@ func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits Dec
 		h := api.CreateLogicalType(id)
 		if h == 0 {
 			return 0, nativeError("create_logical_type", abi.ErrorInvalid, "")
+		}
+		if err := applyLogicalTypeAlias(api, h, lt.Alias); err != nil {
+			api.DestroyLogicalType(&h)
+			return 0, err
 		}
 		return h, nil
 	}
@@ -357,12 +380,15 @@ func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits Dec
 			return 0, nativeError("create_map_type", abi.ErrorInvalid, "")
 		}
 		return h, nil
-	case TypeStruct:
+	case TypeStruct, TypeUnion:
 		if len(lt.Fields) == 0 {
-			return 0, fmt.Errorf("%w: STRUCT requires at least one field", ErrInvalidInput)
+			return 0, fmt.Errorf("%w: %s requires at least one member", ErrInvalidInput, lt.Kind)
+		}
+		if lt.Kind == TypeUnion && len(lt.Fields) > 256 {
+			return 0, fmt.Errorf("%w: union member count %d exceeds 256", ErrLimitExceeded, len(lt.Fields))
 		}
 		if uint64(len(lt.Fields)) > limits.MaxCollectionLen {
-			return 0, fmt.Errorf("%w: struct field count %d exceeds %d", ErrLimitExceeded, len(lt.Fields), limits.MaxCollectionLen)
+			return 0, fmt.Errorf("%w: %s member count %d exceeds %d", ErrLimitExceeded, lt.Kind, len(lt.Fields), limits.MaxCollectionLen)
 		}
 		var pinner runtime.Pinner
 		defer pinner.Unpin()
@@ -378,11 +404,11 @@ func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits Dec
 		namePtrs := make([]uintptr, len(lt.Fields))
 		for i, f := range lt.Fields {
 			if f.Name == "" {
-				return 0, fmt.Errorf("%w: struct field %d has empty name", ErrInvalidInput, i)
+				return 0, fmt.Errorf("%w: %s member %d has empty name", ErrInvalidInput, lt.Kind, i)
 			}
 			cb, err := abi.CString(f.Name)
 			if err != nil {
-				return 0, fmt.Errorf("%w: struct field %q: %v", ErrInvalidInput, f.Name, err)
+				return 0, fmt.Errorf("%w: %s member %q: %v", ErrInvalidInput, lt.Kind, f.Name, err)
 			}
 			cnames[i] = cb
 			pinner.Pin(&cb[0])
@@ -393,12 +419,20 @@ func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits Dec
 			}
 			memberTypes[i] = mt
 		}
-		h := api.CreateStructType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
+		var h uintptr
+		var op string
+		if lt.Kind == TypeStruct {
+			op = "create_struct_type"
+			h = api.CreateStructType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
+		} else {
+			op = "create_union_type"
+			h = api.CreateUnionType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
+		}
 		runtime.KeepAlive(cnames)
 		runtime.KeepAlive(namePtrs)
 		runtime.KeepAlive(memberTypes)
 		if h == 0 {
-			return 0, nativeError("create_struct_type", abi.ErrorInvalid, "")
+			return 0, nativeError(op, abi.ErrorInvalid, "")
 		}
 		return h, nil
 	default:
@@ -541,6 +575,54 @@ func createNativeValue(api *abi.API, v Value, depth int, limits DecodeLimits) (u
 		op = "create_uuid"
 		// Value stores UUID bytes [0:8] (high 64 bits) in v.lo and [8:16] (low 64 bits) in v.hi.
 		nv = api.CreateUUID(abi.Uhugeint{Lower: v.hi, Upper: v.lo})
+	case TypeBit:
+		raw, _ := v.ref.([]byte)
+		if err := (Bit{Data: raw}).Validate(); err != nil {
+			return 0, err
+		}
+		var pinner runtime.Pinner
+		pinner.Pin(&raw[0])
+		op = "create_bit"
+		nv = api.CreateBit(abi.Bit{
+			Data: uintptr(unsafe.Pointer(&raw[0])),
+			Size: uint64(len(raw)),
+		})
+		pinner.Unpin()
+		runtime.KeepAlive(raw)
+	case TypeBignum:
+		mag, _ := v.ref.([]byte)
+		isNeg := v.lo != 0 && len(mag) > 0
+		if len(mag) == 0 {
+			mag = []byte{0}
+			isNeg = false
+		}
+		var pinner runtime.Pinner
+		pinner.Pin(&mag[0])
+		op = "create_bignum"
+		nv = api.CreateBignum(abi.Bignum{
+			Data:       uintptr(unsafe.Pointer(&mag[0])),
+			Size:       uint64(len(mag)),
+			IsNegative: isNeg,
+		})
+		pinner.Unpin()
+		runtime.KeepAlive(mag)
+	case TypeUnion:
+		if v.lt == nil || v.lt.Kind != TypeUnion || int(v.lo) >= len(v.lt.Fields) {
+			return 0, fmt.Errorf("%w: invalid UNION value", ErrInvalidInput)
+		}
+		unionLT, err := createNativeLogicalType(api, *v.lt, depth, limits)
+		if err != nil {
+			return 0, err
+		}
+		defer api.DestroyLogicalType(&unionLT)
+		inner, _ := v.ref.(Value)
+		memberVal, err := createNativeValue(api, inner, depth+1, limits)
+		if err != nil {
+			return 0, err
+		}
+		defer api.DestroyValue(&memberVal)
+		op = "create_union_value"
+		nv = api.CreateUnionValue(unionLT, v.lo, memberVal)
 	case TypeEnum:
 		if v.lt == nil || v.lt.Kind != TypeEnum || uint64(v.lo) >= uint64(len(v.lt.EnumValues)) {
 			return 0, fmt.Errorf("%w: invalid ENUM value", ErrInvalidInput)

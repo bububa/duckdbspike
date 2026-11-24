@@ -45,10 +45,14 @@ const (
 	TypeUUID
 	TypeEnum
 	TypeSQLNull
+	TypeBit
+	TypeBignum
+	TypeGeometry
 	TypeList
 	TypeArray
 	TypeStruct
 	TypeMap
+	TypeUnion
 
 	// typeDefault is an internal sentinel kind used exclusively by DefaultValue()
 	// to request SQL column DEFAULT evaluation in Appender.AppendRow.
@@ -117,6 +121,12 @@ func (k TypeKind) String() string {
 		return "ENUM"
 	case TypeSQLNull:
 		return "SQLNULL"
+	case TypeBit:
+		return "BIT"
+	case TypeBignum:
+		return "BIGNUM"
+	case TypeGeometry:
+		return "GEOMETRY"
 	case TypeList:
 		return "LIST"
 	case TypeArray:
@@ -125,6 +135,8 @@ func (k TypeKind) String() string {
 		return "STRUCT"
 	case TypeMap:
 		return "MAP"
+	case TypeUnion:
+		return "UNION"
 	default:
 		return "INVALID"
 	}
@@ -141,6 +153,7 @@ type StructFieldType struct {
 type LogicalType struct {
 	Kind         TypeKind
 	Alias        string
+	GeometryCRS  string
 	DecimalWidth uint8
 	DecimalScale uint8
 	ArraySize    uint64
@@ -199,6 +212,20 @@ func StructType(fields ...StructFieldType) LogicalType {
 	return LogicalType{Kind: TypeStruct, Fields: cp}
 }
 
+// UnionType constructs a UNION LogicalType from positional tagged member definitions.
+func UnionType(members ...StructFieldType) LogicalType {
+	cp := make([]StructFieldType, len(members))
+	for i, m := range members {
+		cp[i] = StructFieldType{Name: m.Name, Type: *cloneLogicalType(m.Type)}
+	}
+	return LogicalType{Kind: TypeUnion, Fields: cp}
+}
+
+// GeometryType constructs a GEOMETRY LogicalType with an optional CRS string.
+func GeometryType(crs string) LogicalType {
+	return LogicalType{Kind: TypeGeometry, GeometryCRS: crs}
+}
+
 // IsJSON reports whether t is DuckDB's JSON logical type (VARCHAR aliased as "JSON").
 func (t LogicalType) IsJSON() bool {
 	return t.Kind == TypeVarchar && t.Alias == "JSON"
@@ -228,11 +255,11 @@ func cloneLogicalType(t LogicalType) *LogicalType {
 }
 
 func (t LogicalType) needsHeapMeta() bool {
-	if t.Alias != "" {
+	if t.Alias != "" || t.GeometryCRS != "" {
 		return true
 	}
 	switch t.Kind {
-	case TypeEnum, TypeList, TypeArray, TypeStruct, TypeMap:
+	case TypeEnum, TypeList, TypeArray, TypeStruct, TypeMap, TypeUnion:
 		return true
 	default:
 		return false
@@ -243,6 +270,7 @@ func (t LogicalType) needsHeapMeta() bool {
 func (t LogicalType) Equal(other LogicalType) bool {
 	if t.Kind != other.Kind ||
 		t.Alias != other.Alias ||
+		t.GeometryCRS != other.GeometryCRS ||
 		t.DecimalWidth != other.DecimalWidth ||
 		t.DecimalScale != other.DecimalScale ||
 		t.ArraySize != other.ArraySize {
@@ -309,6 +337,18 @@ func (t LogicalType) String() string {
 			parts[i] = f.Name + ":" + f.Type.String()
 		}
 		base = "STRUCT{" + strings.Join(parts, ",") + "}"
+	case TypeUnion:
+		parts := make([]string, len(t.Fields))
+		for i, f := range t.Fields {
+			parts[i] = f.Name + ":" + f.Type.String()
+		}
+		base = "UNION{" + strings.Join(parts, ",") + "}"
+	case TypeGeometry:
+		if t.GeometryCRS != "" {
+			base = fmt.Sprintf("GEOMETRY(%q)", t.GeometryCRS)
+		} else {
+			base = "GEOMETRY"
+		}
 	default:
 		base = t.Kind.String()
 	}
@@ -543,10 +583,25 @@ func (d Decimal) String() string {
 	return digits
 }
 
+// Date infinity sentinels matching DuckDB's date_t::infinity / ninfinity.
+const (
+	DateInfinity    int32 = math.MaxInt32
+	DateNegInfinity int32 = -math.MaxInt32
+)
+
 // Date is days since 1970-01-01 (proleptic Gregorian calendar).
 type Date struct {
 	Days int32
 }
+
+// IsInfinity reports whether d represents DuckDB's positive infinity DATE.
+func (d Date) IsInfinity() bool { return d.Days == DateInfinity }
+
+// IsNegInfinity reports whether d represents DuckDB's negative infinity DATE.
+func (d Date) IsNegInfinity() bool { return d.Days == DateNegInfinity }
+
+// IsFinite reports whether d is neither +infinity nor -infinity.
+func (d Date) IsFinite() bool { return d.Days != DateInfinity && d.Days != DateNegInfinity }
 
 // Time is microseconds since 00:00:00.
 type Time struct {
@@ -601,11 +656,28 @@ const (
 	TimestampUnitTZ
 )
 
+// Timestamp infinity sentinels matching DuckDB's timestamp_t::infinity / ninfinity.
+const (
+	TimestampInfinity    int64 = math.MaxInt64
+	TimestampNegInfinity int64 = -math.MaxInt64
+)
+
 // Timestamp preserves DuckDB's exact timestamp unit without converting through
 // UnixNano (which would overflow outside 1677..2262).
 type Timestamp struct {
 	Value int64
 	Unit  TimestampUnit
+}
+
+// IsInfinity reports whether t represents DuckDB's positive infinity TIMESTAMP.
+func (t Timestamp) IsInfinity() bool { return t.Value == TimestampInfinity }
+
+// IsNegInfinity reports whether t represents DuckDB's negative infinity TIMESTAMP.
+func (t Timestamp) IsNegInfinity() bool { return t.Value == TimestampNegInfinity }
+
+// IsFinite reports whether t is neither +infinity nor -infinity.
+func (t Timestamp) IsFinite() bool {
+	return t.Value != TimestampInfinity && t.Value != TimestampNegInfinity
 }
 
 // Interval preserves DuckDB's three-component interval without collapsing
@@ -653,6 +725,136 @@ type MapValue struct {
 	KeyType   LogicalType
 	ValueType LogicalType
 	Entries   []MapEntry
+}
+
+// Bit is an owned SQL BIT string in DuckDB's wire layout: Data[0] stores the
+// number of leading padding bits (0..7) in Data[1], followed by big-endian bit
+// payload bytes.
+type Bit struct {
+	Data []byte
+}
+
+// Validate checks that b is a well-formed DuckDB BIT payload.
+func (b Bit) Validate() error {
+	if len(b.Data) == 0 {
+		return fmt.Errorf("%w: empty BIT payload (missing padding header byte)", ErrInvalidInput)
+	}
+	if b.Data[0] > 7 {
+		return fmt.Errorf("%w: invalid BIT padding byte %d (must be 0..7)", ErrInvalidInput, b.Data[0])
+	}
+	if len(b.Data) == 1 && b.Data[0] != 0 {
+		return fmt.Errorf("%w: zero-length BIT has non-zero padding %d", ErrInvalidInput, b.Data[0])
+	}
+	return nil
+}
+
+// BitLen returns the number of logical bits in b.
+func (b Bit) BitLen() int {
+	if len(b.Data) <= 1 {
+		return 0
+	}
+	return (len(b.Data)-1)*8 - int(b.Data[0])
+}
+
+// String formats b as a string of '0' and '1' characters.
+func (b Bit) String() string {
+	n := b.BitLen()
+	if n <= 0 {
+		return ""
+	}
+	pad := int(b.Data[0])
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		bitPos := pad + i
+		byteIdx := 1 + bitPos/8
+		shift := uint(7 - (bitPos % 8))
+		if b.Data[byteIdx]&(1<<shift) != 0 {
+			out[i] = '1'
+		} else {
+			out[i] = '0'
+		}
+	}
+	return string(out)
+}
+
+// NewBitFromString parses a string of '0' and '1' characters into a Bit.
+func NewBitFromString(s string) (Bit, error) {
+	if len(s) == 0 {
+		return Bit{Data: []byte{0}}, nil
+	}
+	pad := (8 - (len(s) % 8)) % 8
+	nbytes := (len(s) + pad) / 8
+	data := make([]byte, 1+nbytes)
+	data[0] = byte(pad)
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '0':
+		case '1':
+			bitPos := pad + i
+			data[1+bitPos/8] |= 1 << uint(7-(bitPos%8))
+		default:
+			return Bit{}, fmt.Errorf("%w: invalid bit character %q at index %d", ErrInvalidInput, s[i], i)
+		}
+	}
+	return Bit{Data: data}, nil
+}
+
+// Bignum is an immutable arbitrary-precision signed integer matching DuckDB's
+// BIGNUM (formerly VARINT) SQL type.
+type Bignum struct {
+	neg bool
+	mag []byte // big-endian unsigned magnitude without leading zeros; empty for 0
+}
+
+// BignumFromBigInt copies v into an immutable Bignum. v is borrowed.
+func BignumFromBigInt(v *big.Int) (Bignum, error) {
+	if v == nil {
+		return Bignum{}, fmt.Errorf("%w: nil big.Int", ErrInvalidInput)
+	}
+	if v.Sign() == 0 {
+		return Bignum{}, nil
+	}
+	return Bignum{
+		neg: v.Sign() < 0,
+		mag: v.Bytes(), // fresh big-endian slice
+	}, nil
+}
+
+// BignumFromInt64 constructs a Bignum from an int64.
+func BignumFromInt64(v int64) Bignum {
+	bn, _ := BignumFromBigInt(big.NewInt(v))
+	return bn
+}
+
+// IsNegative reports whether b < 0.
+func (b Bignum) IsNegative() bool { return b.neg && len(b.mag) > 0 }
+
+// BigInt returns a fresh owned *big.Int equal to b.
+func (b Bignum) BigInt() *big.Int {
+	v := new(big.Int).SetBytes(b.mag)
+	if b.neg && len(b.mag) > 0 {
+		v.Neg(v)
+	}
+	return v
+}
+
+// String formats b in base 10.
+func (b Bignum) String() string {
+	return b.BigInt().String()
+}
+
+// Geometry holds an owned WKB (Well-Known Binary) payload and optional CRS
+// string from a DuckDB GEOMETRY column.
+type Geometry struct {
+	WKB []byte
+	CRS string
+}
+
+// UnionValue holds the active tagged member of a decoded or bound SQL UNION.
+type UnionValue struct {
+	Tag     uint8
+	TagName string
+	Value   Value
 }
 
 // Value holds one SQL parameter or decoded column value with exact type and
@@ -905,13 +1107,16 @@ func validateLogicalType(lt LogicalType, depth int) error {
 			return err
 		}
 		return validateLogicalType(*lt.Value, depth+1)
-	case TypeStruct:
+	case TypeStruct, TypeUnion:
 		if len(lt.Fields) == 0 {
-			return fmt.Errorf("%w: STRUCT requires at least one field", ErrInvalidInput)
+			return fmt.Errorf("%w: %s requires at least one member", ErrInvalidInput, lt.Kind)
+		}
+		if lt.Kind == TypeUnion && len(lt.Fields) > 256 {
+			return fmt.Errorf("%w: UNION member count %d exceeds 256", ErrInvalidInput, len(lt.Fields))
 		}
 		for i, f := range lt.Fields {
 			if f.Name == "" {
-				return fmt.Errorf("%w: STRUCT field %d has empty name", ErrInvalidInput, i)
+				return fmt.Errorf("%w: %s member %d has empty name", ErrInvalidInput, lt.Kind, i)
 			}
 			if err := validateLogicalType(f.Type, depth+1); err != nil {
 				return err
@@ -1032,6 +1237,65 @@ func NewMapValue(keyType, valueType LogicalType, entries []MapEntry) (Value, err
 	cp := make([]MapEntry, len(entries))
 	copy(cp, entries)
 	return Value{kind: uint8(TypeMap), ref: cp, lt: lt}, nil
+}
+
+// BitValue validates b and copies its bytes into an owned BIT Value.
+func BitValue(b Bit) (Value, error) {
+	if err := b.Validate(); err != nil {
+		return Value{}, err
+	}
+	cp := make([]byte, len(b.Data))
+	copy(cp, b.Data)
+	return Value{kind: uint8(TypeBit), ref: cp}, nil
+}
+
+// BignumValue copies b into an owned BIGNUM Value.
+func BignumValue(b Bignum) Value {
+	var neg uint64
+	if b.IsNegative() {
+		neg = 1
+	}
+	var cp []byte
+	if len(b.mag) > 0 {
+		cp = make([]byte, len(b.mag))
+		copy(cp, b.mag)
+	}
+	return Value{kind: uint8(TypeBignum), lo: neg, ref: cp}
+}
+
+// GeometryValue copies g.WKB into an owned GEOMETRY Value.
+func GeometryValue(g Geometry) Value {
+	cp := make([]byte, len(g.WKB))
+	copy(cp, g.WKB)
+	var lt *LogicalType
+	if g.CRS != "" {
+		lt = cloneLogicalType(GeometryType(g.CRS))
+	}
+	return Value{kind: uint8(TypeGeometry), ref: cp, lt: lt}
+}
+
+// NewUnionValue validates unionType, tag, and member value and constructs an
+// owned SQL UNION Value suitable for parameter binding.
+func NewUnionValue(unionType LogicalType, tag uint8, val Value) (Value, error) {
+	if unionType.Kind != TypeUnion {
+		return Value{}, fmt.Errorf("%w: NewUnionValue requires a UNION LogicalType", ErrInvalidInput)
+	}
+	if err := validateLogicalType(unionType, 0); err != nil {
+		return Value{}, err
+	}
+	if int(tag) >= len(unionType.Fields) {
+		return Value{}, fmt.Errorf("%w: union tag %d out of range [0,%d)", ErrOutOfRange, tag, len(unionType.Fields))
+	}
+	member := unionType.Fields[tag]
+	if err := checkElementType(val, member.Type); err != nil {
+		return Value{}, fmt.Errorf("union member %q: %w", member.Name, err)
+	}
+	return Value{
+		kind: uint8(TypeUnion),
+		lo:   uint64(tag),
+		ref:  val,
+		lt:   cloneLogicalType(unionType),
+	}, nil
 }
 
 func (v Value) check(want TypeKind) error {
@@ -1365,5 +1629,63 @@ func (v Value) Map() (MapValue, error) {
 		KeyType:   keyType,
 		ValueType: valType,
 		Entries:   append([]MapEntry{}, entries...),
+	}, nil
+}
+
+// Bit returns an owned Bit copy.
+func (v Value) Bit() (Bit, error) {
+	if err := v.check(TypeBit); err != nil {
+		return Bit{}, err
+	}
+	src, _ := v.ref.([]byte)
+	cp := make([]byte, len(src))
+	copy(cp, src)
+	return Bit{Data: cp}, nil
+}
+
+// Bignum returns an immutable Bignum copy.
+func (v Value) Bignum() (Bignum, error) {
+	if err := v.check(TypeBignum); err != nil {
+		return Bignum{}, err
+	}
+	src, _ := v.ref.([]byte)
+	var cp []byte
+	if len(src) > 0 {
+		cp = make([]byte, len(src))
+		copy(cp, src)
+	}
+	return Bignum{neg: v.lo != 0 && len(cp) > 0, mag: cp}, nil
+}
+
+// Geometry returns an owned Geometry copy.
+func (v Value) Geometry() (Geometry, error) {
+	if err := v.check(TypeGeometry); err != nil {
+		return Geometry{}, err
+	}
+	src, _ := v.ref.([]byte)
+	cp := make([]byte, len(src))
+	copy(cp, src)
+	var crs string
+	if v.lt != nil {
+		crs = v.lt.GeometryCRS
+	}
+	return Geometry{WKB: cp, CRS: crs}, nil
+}
+
+// Union returns the active tagged member of a SQL UNION Value.
+func (v Value) Union() (UnionValue, error) {
+	if err := v.check(TypeUnion); err != nil {
+		return UnionValue{}, err
+	}
+	tag := uint8(v.lo)
+	var tagName string
+	if v.lt != nil && int(tag) < len(v.lt.Fields) {
+		tagName = v.lt.Fields[tag].Name
+	}
+	inner, _ := v.ref.(Value)
+	return UnionValue{
+		Tag:     tag,
+		TagName: tagName,
+		Value:   inner,
 	}, nil
 }

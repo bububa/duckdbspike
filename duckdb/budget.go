@@ -360,9 +360,12 @@ func valueBytes(v Value) uint64 {
 	case TypeEnum:
 		s, _ := v.ref.(string)
 		return 16 + uint64(len(s))
-	case TypeBlob:
+	case TypeBlob, TypeBit, TypeBignum, TypeGeometry:
 		b, _ := v.ref.([]byte)
 		return 24 + uint64(len(b))
+	case TypeUnion:
+		inner, _ := v.ref.(Value)
+		return 24 + valueBytes(inner)
 	case TypeList:
 		elems, _ := v.ref.([]Value)
 		total := uint64(24)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"runtime"
+	"unsafe"
 
 	"github.com/bububa/duckdbspike/internal/abi"
 )
@@ -25,6 +26,129 @@ type Appender struct {
 // Empty catalog or schema selects DuckDB's default catalog/schema.
 func (c *Conn) NewAppender(ctx context.Context, catalog, schema, table string) (*Appender, error) {
 	return c.newAppenderWithTx(ctx, nil, catalog, schema, table)
+}
+
+// NewQueryAppender opens an exclusive bulk Appender that executes query (such
+// as INSERT ... ON CONFLICT DO UPDATE, MERGE INTO, UPDATE, or DELETE) against
+// each flushed batch of rows matching cols. If tableName is empty, DuckDB
+// defaults to "appended_data". If all Column.Name values are empty, DuckDB
+// defaults to "col1", "col2", ....
+func (c *Conn) NewQueryAppender(ctx context.Context, query string, cols []Column, tableName string) (*Appender, error) {
+	return c.newQueryAppenderWithTx(ctx, nil, query, cols, tableName)
+}
+
+func (c *Conn) newQueryAppenderWithTx(ctx context.Context, tx *Tx, query string, cols []Column, tableName string) (*Appender, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if query == "" {
+		return nil, fmt.Errorf("%w: empty query appender SQL", ErrInvalidInput)
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("%w: query appender requires at least one column", ErrInvalidInput)
+	}
+	cquery, err := abi.CString(query)
+	if err != nil {
+		return nil, fmt.Errorf("%w: query: %v", ErrInvalidInput, err)
+	}
+	var ctable []byte
+	var tablePtr *byte
+	if tableName != "" {
+		ctable, err = abi.CString(tableName)
+		if err != nil {
+			return nil, fmt.Errorf("%w: tableName: %v", ErrInvalidInput, err)
+		}
+		tablePtr = &ctable[0]
+	}
+
+	namedCount := 0
+	for _, col := range cols {
+		if col.Name != "" {
+			namedCount++
+		}
+	}
+	if namedCount > 0 && namedCount != len(cols) {
+		return nil, fmt.Errorf("%w: query appender column names must either all be specified or all be empty", ErrInvalidInput)
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
+	if err := c.usableLocked(); err != nil {
+		return nil, err
+	}
+
+	api := c.api
+	nativeTypes := make([]uintptr, len(cols))
+	defer func() {
+		for i := range nativeTypes {
+			if nativeTypes[i] != 0 {
+				api.DestroyLogicalType(&nativeTypes[i])
+			}
+		}
+	}()
+	for i, col := range cols {
+		lt, err := createNativeLogicalType(api, col.Type, 0, c.limits)
+		if err != nil {
+			return nil, fmt.Errorf("query appender column %d: %w", i, err)
+		}
+		nativeTypes[i] = lt
+	}
+
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	var colNamePtrs []uintptr
+	var cnames [][]byte
+	var colNamesArg *uintptr
+	if namedCount > 0 {
+		cnames = make([][]byte, len(cols))
+		colNamePtrs = make([]uintptr, len(cols))
+		for i, col := range cols {
+			cb, err := abi.CString(col.Name)
+			if err != nil {
+				return nil, fmt.Errorf("%w: column %d name: %v", ErrInvalidInput, i, err)
+			}
+			cnames[i] = cb
+			pinner.Pin(&cb[0])
+			colNamePtrs[i] = uintptr(unsafe.Pointer(&cb[0]))
+		}
+		colNamesArg = &colNamePtrs[0]
+	}
+
+	var handle uintptr
+	state := api.AppenderCreateQuery(c.handle, &cquery[0], uint64(len(nativeTypes)), &nativeTypes[0], tablePtr, colNamesArg, &handle)
+	runtime.KeepAlive(cquery)
+	runtime.KeepAlive(ctable)
+	runtime.KeepAlive(nativeTypes)
+	runtime.KeepAlive(cnames)
+	runtime.KeepAlive(colNamePtrs)
+	if state != abi.StateSuccess {
+		var appErr *Error
+		if handle != 0 {
+			appErr = consumeErrorData(api, "appender_create_query", api.AppenderErrorData(handle))
+			_ = api.AppenderDestroy(&handle)
+		}
+		if appErr == nil {
+			appErr = nativeError("appender_create_query", abi.ErrorInvalid, "")
+		}
+		return nil, appErr
+	}
+
+	app := &Appender{conn: c, handle: handle}
+	if err := app.refreshColumnsLocked(); err != nil {
+		_ = api.AppenderDestroy(&app.handle)
+		return nil, err
+	}
+	c.activeAppender = app
+	return app, nil
 }
 
 func (c *Conn) newAppenderWithTx(ctx context.Context, tx *Tx, catalog, schema, table string) (*Appender, error) {
@@ -272,7 +396,8 @@ func (a *Appender) appendOneLocked(colIdx int, v Value) error {
 			}
 		case TypeDecimal, TypeTimeNS, TypeTimeTZ,
 			TypeTimestampS, TypeTimestampMS, TypeTimestampNS, TypeTimestampTZ,
-			TypeUUID, TypeEnum, TypeList, TypeArray, TypeStruct, TypeMap:
+			TypeUUID, TypeEnum, TypeBit, TypeBignum,
+			TypeList, TypeArray, TypeStruct, TypeMap, TypeUnion:
 			nv, err := createNativeValue(api, v, 0, a.conn.limits)
 			if err != nil {
 				return fmt.Errorf("appender col[%d]: %w", colIdx, err)

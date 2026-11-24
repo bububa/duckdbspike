@@ -133,12 +133,15 @@ type API struct {
 	CreateInterval      func(value Interval) uintptr
 	CreateVarcharLength func(text *byte, length uint64) uintptr
 	CreateBlob          func(data *byte, length uint64) uintptr
+	CreateBit           func(input Bit) uintptr
+	CreateBignum        func(input Bignum) uintptr
 	CreateUUID          func(value Uhugeint) uintptr
 	CreateEnumValue     func(enumType uintptr, value uint64) uintptr
 	CreateListValue     func(elemType uintptr, values *uintptr, count uint64) uintptr
 	CreateArrayValue    func(elemType uintptr, values *uintptr, count uint64) uintptr
 	CreateStructValue   func(structType uintptr, values *uintptr) uintptr
 	CreateMapValue      func(mapType uintptr, keys *uintptr, values *uintptr, count uint64) uintptr
+	CreateUnionValue    func(unionType uintptr, tagIndex uint64, value uintptr) uintptr
 	// GetMapKey and GetMapValue return owned duckdb_value handles released by
 	// DestroyValue. GetVarchar returns an owned C string released by Free.
 	GetMapSize   func(value uintptr) uint64
@@ -177,6 +180,7 @@ type API struct {
 	GetTypeID func(logicalType uintptr) int32
 	// LogicalTypeGetAlias returns an OWNED C string released by Free (or 0 if unset).
 	LogicalTypeGetAlias func(logicalType uintptr) uintptr
+	LogicalTypeSetAlias func(logicalType uintptr, alias *byte)
 	DecimalWidth        func(logicalType uintptr) uint8
 	DecimalScale        func(logicalType uintptr) uint8
 	DecimalInternalType func(logicalType uintptr) int32
@@ -193,6 +197,11 @@ type API struct {
 	StructTypeChildCount func(logicalType uintptr) uint64
 	StructTypeChildName  func(logicalType uintptr, index uint64) uintptr
 	StructTypeChildType  func(logicalType uintptr, index uint64) uintptr
+	UnionTypeMemberCount func(logicalType uintptr) uint64
+	UnionTypeMemberName  func(logicalType uintptr, index uint64) uintptr
+	UnionTypeMemberType  func(logicalType uintptr, index uint64) uintptr
+	// GeometryTypeGetCRS returns an OWNED C string released by Free (or 0 if unset).
+	GeometryTypeGetCRS func(logicalType uintptr) uintptr
 	// Create*Type allocate an owned logical type released by DestroyLogicalType.
 	CreateLogicalType  func(typeID int32) uintptr
 	CreateDecimalType  func(width, scale uint8) uintptr
@@ -200,6 +209,7 @@ type API struct {
 	CreateArrayType    func(childType uintptr, arraySize uint64) uintptr
 	CreateMapType      func(keyType, valueType uintptr) uintptr
 	CreateStructType   func(memberTypes *uintptr, memberNames *uintptr, memberCount uint64) uintptr
+	CreateUnionType    func(memberTypes *uintptr, memberNames *uintptr, memberCount uint64) uintptr
 	CreateEnumType     func(memberNames *uintptr, memberCount uint64) uintptr
 	DestroyLogicalType func(logicalType *uintptr)
 
@@ -219,6 +229,7 @@ type API struct {
 	// AppenderDestroy, even on failure. AppenderColumnType returns an owned
 	// logical type; AppenderErrorData returns an owned duckdb_error_data.
 	AppenderCreateExt    func(connection uintptr, catalog, schema, table *byte, out *uintptr) int32
+	AppenderCreateQuery  func(connection uintptr, query *byte, colCount uint64, types *uintptr, tableName *byte, colNames *uintptr, out *uintptr) int32
 	AppenderColumnCount  func(appender uintptr) uint64
 	AppenderColumnType   func(appender uintptr, colIdx uint64) uintptr
 	AppenderErrorData    func(appender uintptr) uintptr
@@ -366,12 +377,15 @@ func (a *API) symbols() []symbol {
 		{&a.CreateInterval, "duckdb_create_interval"},
 		{&a.CreateVarcharLength, "duckdb_create_varchar_length"},
 		{&a.CreateBlob, "duckdb_create_blob"},
+		{&a.CreateBit, "duckdb_create_bit"},
+		{&a.CreateBignum, "duckdb_create_bignum"},
 		{&a.CreateUUID, "duckdb_create_uuid"},
 		{&a.CreateEnumValue, "duckdb_create_enum_value"},
 		{&a.CreateListValue, "duckdb_create_list_value"},
 		{&a.CreateArrayValue, "duckdb_create_array_value"},
 		{&a.CreateStructValue, "duckdb_create_struct_value"},
 		{&a.CreateMapValue, "duckdb_create_map_value"},
+		{&a.CreateUnionValue, "duckdb_create_union_value"},
 		{&a.GetMapSize, "duckdb_get_map_size"},
 		{&a.GetMapKey, "duckdb_get_map_key"},
 		{&a.GetMapValue, "duckdb_get_map_value"},
@@ -395,6 +409,7 @@ func (a *API) symbols() []symbol {
 		{&a.FetchChunk, "duckdb_fetch_chunk"},
 		{&a.GetTypeID, "duckdb_get_type_id"},
 		{&a.LogicalTypeGetAlias, "duckdb_logical_type_get_alias"},
+		{&a.LogicalTypeSetAlias, "duckdb_logical_type_set_alias"},
 		{&a.DecimalWidth, "duckdb_decimal_width"},
 		{&a.DecimalScale, "duckdb_decimal_scale"},
 		{&a.DecimalInternalType, "duckdb_decimal_internal_type"},
@@ -409,12 +424,17 @@ func (a *API) symbols() []symbol {
 		{&a.StructTypeChildCount, "duckdb_struct_type_child_count"},
 		{&a.StructTypeChildName, "duckdb_struct_type_child_name"},
 		{&a.StructTypeChildType, "duckdb_struct_type_child_type"},
+		{&a.UnionTypeMemberCount, "duckdb_union_type_member_count"},
+		{&a.UnionTypeMemberName, "duckdb_union_type_member_name"},
+		{&a.UnionTypeMemberType, "duckdb_union_type_member_type"},
+		{&a.GeometryTypeGetCRS, "duckdb_geometry_type_get_crs"},
 		{&a.CreateLogicalType, "duckdb_create_logical_type"},
 		{&a.CreateDecimalType, "duckdb_create_decimal_type"},
 		{&a.CreateListType, "duckdb_create_list_type"},
 		{&a.CreateArrayType, "duckdb_create_array_type"},
 		{&a.CreateMapType, "duckdb_create_map_type"},
 		{&a.CreateStructType, "duckdb_create_struct_type"},
+		{&a.CreateUnionType, "duckdb_create_union_type"},
 		{&a.CreateEnumType, "duckdb_create_enum_type"},
 		{&a.DestroyLogicalType, "duckdb_destroy_logical_type"},
 		{&a.DataChunkGetSize, "duckdb_data_chunk_get_size"},
@@ -428,6 +448,7 @@ func (a *API) symbols() []symbol {
 		{&a.StructVectorGetChild, "duckdb_struct_vector_get_child"},
 		{&a.ArrayVectorGetChild, "duckdb_array_vector_get_child"},
 		{&a.AppenderCreateExt, "duckdb_appender_create_ext"},
+		{&a.AppenderCreateQuery, "duckdb_appender_create_query"},
 		{&a.AppenderColumnCount, "duckdb_appender_column_count"},
 		{&a.AppenderColumnType, "duckdb_appender_column_type"},
 		{&a.AppenderErrorData, "duckdb_appender_error_data"},

@@ -13,16 +13,6 @@ func toDuckDBValue(v any) (duckdb.Value, error) {
 	if v == nil {
 		return duckdb.NullValue(), nil
 	}
-	if valuer, ok := v.(driver.Valuer); ok {
-		dv, err := valuer.Value()
-		if err != nil {
-			return duckdb.Value{}, err
-		}
-		if dv == nil {
-			return duckdb.NullValue(), nil
-		}
-		v = dv
-	}
 	switch x := v.(type) {
 	case duckdb.Value:
 		if x.IsDefault() {
@@ -79,8 +69,32 @@ func toDuckDBValue(v any) (duckdb.Value, error) {
 		return duckdb.TimestampValue(x)
 	case duckdb.Interval:
 		return duckdb.IntervalValue(x), nil
+	case duckdb.Bit:
+		return duckdb.BitValue(x)
+	case duckdb.Bignum:
+		return duckdb.BignumValue(x), nil
+	case duckdb.ListValue:
+		return duckdb.NewListValue(x.ElemType, x.Elements)
+	case duckdb.ArrayValue:
+		return duckdb.NewArrayValue(x.ElemType, x.Elements)
+	case duckdb.StructValue:
+		return duckdb.NewStructValue(x.Fields)
+	case duckdb.MapValue:
+		return duckdb.NewMapValue(x.KeyType, x.ValueType, x.Entries)
 	case time.Time:
 		return timeToDuckDBValue(x)
+	case driver.Valuer:
+		dv, err := x.Value()
+		if err != nil {
+			return duckdb.Value{}, err
+		}
+		if dv == nil {
+			return duckdb.NullValue(), nil
+		}
+		if reflect.TypeOf(dv) == reflect.TypeOf(v) {
+			return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
+		}
+		return toDuckDBValue(dv)
 	default:
 		return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
 	}
@@ -144,6 +158,9 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 			return nil, err
 		}
 		if scanTime {
+			if !d.IsFinite() {
+				return nil, fmt.Errorf("%w: non-finite DATE (%d) cannot be scanned into time.Time", duckdb.ErrOutOfRange, d.Days)
+			}
 			return time.Unix(int64(d.Days)*86400, 0).UTC(), nil
 		}
 		return d, nil
@@ -168,6 +185,12 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 		return v.UUID()
 	case duckdb.TypeEnum:
 		return v.Enum()
+	case duckdb.TypeBit:
+		return v.Bit()
+	case duckdb.TypeBignum:
+		return v.Bignum()
+	case duckdb.TypeGeometry:
+		return v.Geometry()
 	case duckdb.TypeList:
 		return v.List()
 	case duckdb.TypeArray:
@@ -176,12 +199,17 @@ func fromDuckDBValue(v duckdb.Value, scanTime bool) (driver.Value, error) {
 		return v.Struct()
 	case duckdb.TypeMap:
 		return v.Map()
+	case duckdb.TypeUnion:
+		return v.Union()
 	default:
 		return nil, fmt.Errorf("%w: %s", duckdb.ErrUnsupportedType, v.Kind())
 	}
 }
 
 func timestampToTime(ts duckdb.Timestamp) (time.Time, error) {
+	if !ts.IsFinite() {
+		return time.Time{}, fmt.Errorf("%w: non-finite TIMESTAMP (%d) cannot be scanned into time.Time", duckdb.ErrOutOfRange, ts.Value)
+	}
 	switch ts.Unit {
 	case duckdb.TimestampUnitSeconds:
 		return time.Unix(ts.Value, 0).UTC(), nil
@@ -252,6 +280,12 @@ func scanTypeForLogicalType(lt duckdb.LogicalType, scanTime bool) reflect.Type {
 		return reflect.TypeFor[duckdb.UUID]()
 	case duckdb.TypeEnum:
 		return reflect.TypeFor[duckdb.Enum]()
+	case duckdb.TypeBit:
+		return reflect.TypeFor[duckdb.Bit]()
+	case duckdb.TypeBignum:
+		return reflect.TypeFor[duckdb.Bignum]()
+	case duckdb.TypeGeometry:
+		return reflect.TypeFor[duckdb.Geometry]()
 	case duckdb.TypeList:
 		return reflect.TypeFor[duckdb.ListValue]()
 	case duckdb.TypeArray:
@@ -260,6 +294,8 @@ func scanTypeForLogicalType(lt duckdb.LogicalType, scanTime bool) reflect.Type {
 		return reflect.TypeFor[duckdb.StructValue]()
 	case duckdb.TypeMap:
 		return reflect.TypeFor[duckdb.MapValue]()
+	case duckdb.TypeUnion:
+		return reflect.TypeFor[duckdb.UnionValue]()
 	default:
 		return reflect.TypeFor[any]()
 	}

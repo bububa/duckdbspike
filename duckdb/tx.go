@@ -180,6 +180,14 @@ func (tx *Tx) NewAppender(ctx context.Context, catalog, schema, table string) (*
 	return tx.conn.newAppenderWithTx(ctx, tx, catalog, schema, table)
 }
 
+// NewQueryAppender opens an exclusive query-backed bulk Appender within tx.
+func (tx *Tx) NewQueryAppender(ctx context.Context, query string, cols []Column, tableName string) (*Appender, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	return tx.conn.newQueryAppenderWithTx(ctx, tx, query, cols, tableName)
+}
+
 // QueryArrow starts a streaming Arrow C Data Interface query within tx.
 func (tx *Tx) QueryArrow(ctx context.Context, sql string, args ...Value) (*ArrowRows, error) {
 	if tx == nil || tx.conn == nil {

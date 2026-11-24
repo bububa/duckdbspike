@@ -24,6 +24,7 @@ package duckdb
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/bububa/duckdbspike/internal/abi"
 )
@@ -68,6 +69,41 @@ const (
 	ErrorKindOutOfMemory
 	// ErrorKindPermission reports a denied file or capability access.
 	ErrorKindPermission
+	// ErrorKindConstraint reports a PRIMARY KEY, UNIQUE, NOT NULL, CHECK, or
+	// FOREIGN KEY constraint violation.
+	ErrorKindConstraint
+	// ErrorKindCatalog reports a missing or conflicting catalog object (table, view, schema, type).
+	ErrorKindCatalog
+	// ErrorKindSyntax reports a SQL syntax error.
+	ErrorKindSyntax
+	// ErrorKindParser reports a SQL parser error.
+	ErrorKindParser
+	// ErrorKindBinder reports a SQL binding error (unresolved column/function/ambiguity).
+	ErrorKindBinder
+	// ErrorKindConversion reports a type cast or value conversion failure.
+	ErrorKindConversion
+	// ErrorKindOutOfRange reports a numeric or temporal overflow/range error.
+	ErrorKindOutOfRange
+	// ErrorKindInvalidInput reports an invalid input error reported by DuckDB.
+	ErrorKindInvalidInput
+	// ErrorKindIO reports a filesystem or I/O error.
+	ErrorKindIO
+	// ErrorKindTransaction reports a transaction conflict or invalid transaction state.
+	ErrorKindTransaction
+	// ErrorKindConnection reports a connection-level error.
+	ErrorKindConnection
+	// ErrorKindInvalidType reports an invalid or mismatched SQL type error.
+	ErrorKindInvalidType
+	// ErrorKindSerialization reports a serialization/deserialization error.
+	ErrorKindSerialization
+	// ErrorKindNotImplemented reports an unimplemented engine feature.
+	ErrorKindNotImplemented
+	// ErrorKindHTTP reports an HTTP/network error.
+	ErrorKindHTTP
+	// ErrorKindMissingExtension reports a missing or unautoloaded extension.
+	ErrorKindMissingExtension
+	// ErrorKindConfiguration reports an invalid configuration option or locked setting.
+	ErrorKindConfiguration
 )
 
 func kindOf(nativeType int32) ErrorKind {
@@ -78,6 +114,40 @@ func kindOf(nativeType int32) ErrorKind {
 		return ErrorKindOutOfMemory
 	case abi.ErrorPermission:
 		return ErrorKindPermission
+	case abi.ErrorConstraint:
+		return ErrorKindConstraint
+	case abi.ErrorCatalog:
+		return ErrorKindCatalog
+	case abi.ErrorSyntax:
+		return ErrorKindSyntax
+	case abi.ErrorParser:
+		return ErrorKindParser
+	case abi.ErrorBinder:
+		return ErrorKindBinder
+	case abi.ErrorConversion, abi.ErrorDecimal:
+		return ErrorKindConversion
+	case abi.ErrorOutOfRange, abi.ErrorDivideByZero:
+		return ErrorKindOutOfRange
+	case abi.ErrorInvalidInput, abi.ErrorParameterNotResolved, abi.ErrorParameterNotAllowed:
+		return ErrorKindInvalidInput
+	case abi.ErrorIO:
+		return ErrorKindIO
+	case abi.ErrorTransaction:
+		return ErrorKindTransaction
+	case abi.ErrorConnection:
+		return ErrorKindConnection
+	case abi.ErrorInvalidType, abi.ErrorMismatchType, abi.ErrorUnknownType:
+		return ErrorKindInvalidType
+	case abi.ErrorSerialization:
+		return ErrorKindSerialization
+	case abi.ErrorNotImplemented:
+		return ErrorKindNotImplemented
+	case abi.ErrorHTTP, abi.ErrorNetwork:
+		return ErrorKindHTTP
+	case abi.ErrorMissingExtension, abi.ErrorAutoload:
+		return ErrorKindMissingExtension
+	case abi.ErrorInvalidConfiguration, abi.ErrorSettings:
+		return ErrorKindConfiguration
 	default:
 		return ErrorKindNative
 	}
@@ -96,11 +166,60 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("duckdb %s: %s", e.Op, e.Message)
 }
 
+func kindFromMessage(message string) ErrorKind {
+	switch {
+	case strings.HasPrefix(message, "Constraint Error:"):
+		return ErrorKindConstraint
+	case strings.HasPrefix(message, "Catalog Error:"):
+		return ErrorKindCatalog
+	case strings.HasPrefix(message, "Binder Error:"):
+		return ErrorKindBinder
+	case strings.HasPrefix(message, "Parser Error:"):
+		return ErrorKindParser
+	case strings.HasPrefix(message, "Syntax Error:"):
+		return ErrorKindSyntax
+	case strings.HasPrefix(message, "Conversion Error:"):
+		return ErrorKindConversion
+	case strings.HasPrefix(message, "Out of Range Error:"):
+		return ErrorKindOutOfRange
+	case strings.HasPrefix(message, "Invalid Input Error:"):
+		return ErrorKindInvalidInput
+	case strings.HasPrefix(message, "IO Error:"):
+		return ErrorKindIO
+	case strings.HasPrefix(message, "TransactionContext Error:"), strings.HasPrefix(message, "Transaction Error:"):
+		return ErrorKindTransaction
+	case strings.HasPrefix(message, "Connection Error:"):
+		return ErrorKindConnection
+	case strings.HasPrefix(message, "Invalid type Error:"), strings.HasPrefix(message, "Invalid Type Error:"):
+		return ErrorKindInvalidType
+	case strings.HasPrefix(message, "Serialization Error:"):
+		return ErrorKindSerialization
+	case strings.HasPrefix(message, "Not implemented Error:"):
+		return ErrorKindNotImplemented
+	case strings.HasPrefix(message, "HTTP Error:"):
+		return ErrorKindHTTP
+	case strings.HasPrefix(message, "Out of Memory Error:"):
+		return ErrorKindOutOfMemory
+	case strings.HasPrefix(message, "Permission Error:"):
+		return ErrorKindPermission
+	case strings.HasPrefix(message, "Interrupt Error:"):
+		return ErrorKindInterrupt
+	case strings.HasPrefix(message, "Invalid Configuration Error:"):
+		return ErrorKindConfiguration
+	default:
+		return ErrorKindNative
+	}
+}
+
 func nativeError(op string, nativeType int32, message string) *Error {
 	if message == "" {
 		message = "native call failed without a message"
 	}
-	return &Error{Op: op, Kind: kindOf(nativeType), NativeType: nativeType, Message: message}
+	kind := kindOf(nativeType)
+	if nativeType == abi.ErrorInvalid {
+		kind = kindFromMessage(message)
+	}
+	return &Error{Op: op, Kind: kind, NativeType: nativeType, Message: message}
 }
 
 func consumeErrorData(api *abi.API, op string, errData uintptr) *Error {

@@ -124,6 +124,19 @@ type ArrowArray struct {
 	PrivateData uintptr
 }
 
+// Bit mirrors struct duckdb_bit.
+type Bit struct {
+	Data uintptr
+	Size uint64
+}
+
+// Bignum mirrors struct duckdb_bignum.
+type Bignum struct {
+	Data       uintptr
+	Size       uint64
+	IsNegative bool
+}
+
 // Timestamp mirrors struct duckdb_timestamp (microseconds since 1970-01-01).
 type Timestamp struct {
 	Micros int64
@@ -210,10 +223,84 @@ const (
 	TypeVariant     int32 = 41
 )
 
-// Error types mirror the duckdb_error_type values that callers distinguish.
+// Error types mirror duckdb_error_type (v1.5.6).
 const (
-	ErrorInvalid     int32 = 0
-	ErrorInterrupt   int32 = 29
-	ErrorOutOfMemory int32 = 33
-	ErrorPermission  int32 = 34
+	ErrorInvalid              int32 = 0
+	ErrorOutOfRange           int32 = 1
+	ErrorConversion           int32 = 2
+	ErrorUnknownType          int32 = 3
+	ErrorDecimal              int32 = 4
+	ErrorMismatchType         int32 = 5
+	ErrorDivideByZero         int32 = 6
+	ErrorObjectSize           int32 = 7
+	ErrorInvalidType          int32 = 8
+	ErrorSerialization        int32 = 9
+	ErrorTransaction          int32 = 10
+	ErrorNotImplemented       int32 = 11
+	ErrorExpression           int32 = 12
+	ErrorCatalog              int32 = 13
+	ErrorParser               int32 = 14
+	ErrorPlanner              int32 = 15
+	ErrorScheduler            int32 = 16
+	ErrorExecutor             int32 = 17
+	ErrorConstraint           int32 = 18
+	ErrorIndex                int32 = 19
+	ErrorStat                 int32 = 20
+	ErrorConnection           int32 = 21
+	ErrorSyntax               int32 = 22
+	ErrorSettings             int32 = 23
+	ErrorBinder               int32 = 24
+	ErrorNetwork              int32 = 25
+	ErrorOptimizer            int32 = 26
+	ErrorNullPointer          int32 = 27
+	ErrorIO                   int32 = 28
+	ErrorInterrupt            int32 = 29
+	ErrorFatal                int32 = 30
+	ErrorInternal             int32 = 31
+	ErrorInvalidInput         int32 = 32
+	ErrorOutOfMemory          int32 = 33
+	ErrorPermission           int32 = 34
+	ErrorParameterNotResolved int32 = 35
+	ErrorParameterNotAllowed  int32 = 36
+	ErrorDependency           int32 = 37
+	ErrorHTTP                 int32 = 38
+	ErrorMissingExtension     int32 = 39
+	ErrorAutoload             int32 = 40
+	ErrorSequence             int32 = 41
+	ErrorInvalidConfiguration int32 = 42
+)
+
+// Statement types mirror duckdb_statement_type (v1.5.6).
+const (
+	StatementTypeInvalid          int32 = 0
+	StatementTypeSelect           int32 = 1
+	StatementTypeInsert           int32 = 2
+	StatementTypeUpdate           int32 = 3
+	StatementTypeExplain          int32 = 4
+	StatementTypeDelete           int32 = 5
+	StatementTypePrepare          int32 = 6
+	StatementTypeCreate           int32 = 7
+	StatementTypeExecute          int32 = 8
+	StatementTypeAlter            int32 = 9
+	StatementTypeTransaction      int32 = 10
+	StatementTypeCopy             int32 = 11
+	StatementTypeAnalyze          int32 = 12
+	StatementTypeVariableSet      int32 = 13
+	StatementTypeCreateFunc       int32 = 14
+	StatementTypeDrop             int32 = 15
+	StatementTypeExport           int32 = 16
+	StatementTypePragma           int32 = 17
+	StatementTypeVacuum           int32 = 18
+	StatementTypeCall             int32 = 19
+	StatementTypeSet              int32 = 20
+	StatementTypeLoad             int32 = 21
+	StatementTypeRelation         int32 = 22
+	StatementTypeExtension        int32 = 23
+	StatementTypeLogicalPlan      int32 = 24
+	StatementTypeAttach           int32 = 25
+	StatementTypeDetach           int32 = 26
+	StatementTypeMulti            int32 = 27
+	StatementTypeCopyDatabase     int32 = 28
+	StatementTypeUpdateExtensions int32 = 29
+	StatementTypeMergeInto        int32 = 30
 )

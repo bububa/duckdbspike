@@ -138,6 +138,19 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		plan = columnPlan{lt: ScalarType(TypeUUID)}
 	case abi.TypeSQLNull:
 		plan = columnPlan{lt: ScalarType(TypeSQLNull)}
+	case abi.TypeBit:
+		plan = columnPlan{lt: ScalarType(TypeBit)}
+	case abi.TypeBignum:
+		plan = columnPlan{lt: ScalarType(TypeBignum)}
+	case abi.TypeGeometry:
+		var crs string
+		if api.GeometryTypeGetCRS != nil {
+			if ptr := api.GeometryTypeGetCRS(lt); ptr != 0 {
+				crs = abi.GoString(ptr)
+				api.Free(ptr)
+			}
+		}
+		plan = columnPlan{lt: GeometryType(crs)}
 	case abi.TypeDecimal:
 		width := api.DecimalWidth(lt)
 		scale := api.DecimalScale(lt)
@@ -254,6 +267,32 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 			lt:     LogicalType{Kind: TypeStruct, Fields: fields},
 			fields: fieldPlans,
 		}
+	case abi.TypeUnion:
+		count := api.UnionTypeMemberCount(lt)
+		if count == 0 || count > 256 || count > limits.MaxCollectionLen {
+			return columnPlan{}, fmt.Errorf("%w: union member count %d out of range", ErrLimitExceeded, count)
+		}
+		fields := make([]StructFieldType, 0, count)
+		fieldPlans := make([]columnFieldPlan, 0, count)
+		for i := uint64(0); i < count; i++ {
+			namePtr := api.UnionTypeMemberName(lt, i)
+			name := abi.GoString(namePtr)
+			if namePtr != 0 {
+				api.Free(namePtr)
+			}
+			childLT := api.UnionTypeMemberType(lt, i)
+			childPlan, err := buildColumnPlan(api, childLT, depth+1, limits)
+			api.DestroyLogicalType(&childLT)
+			if err != nil {
+				return columnPlan{}, err
+			}
+			fields = append(fields, StructFieldType{Name: name, Type: childPlan.lt})
+			fieldPlans = append(fieldPlans, columnFieldPlan{name: name, plan: childPlan})
+		}
+		plan = columnPlan{
+			lt:     LogicalType{Kind: TypeUnion, Fields: fields},
+			fields: fieldPlans,
+		}
 	default:
 		return columnPlan{}, fmt.Errorf("%w: native type id %d", ErrUnsupportedType, id)
 	}
@@ -327,6 +366,34 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 		return Value{
 			kind: uint8(TypeStruct),
 			ref:  fields,
+			lt:   &plan.lt,
+		}, nil
+
+	case TypeUnion:
+		tagVec := api.StructVectorGetChild(vec, 0)
+		if tagVec == 0 {
+			return Value{}, fmt.Errorf("%w: null union tag vector", ErrInvalidInput)
+		}
+		if !rowValid(api.VectorGetValidity(tagVec), row) {
+			return typedNullFromPlan(&plan.lt), nil
+		}
+		tagData := api.VectorGetData(tagVec)
+		if tagData == 0 {
+			return Value{}, fmt.Errorf("%w: null union tag data pointer", ErrInvalidInput)
+		}
+		tag := readAt[uint8](tagData, row)
+		if int(tag) >= len(plan.fields) {
+			return Value{}, fmt.Errorf("%w: union tag %d out of range [0,%d)", ErrOutOfRange, tag, len(plan.fields))
+		}
+		memberVec := api.StructVectorGetChild(vec, uint64(tag)+1)
+		v, err := decodeVectorValue(api, &plan.fields[tag].plan, memberVec, row, limits)
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{
+			kind: uint8(TypeUnion),
+			lo:   uint64(tag),
+			ref:  v,
 			lt:   &plan.lt,
 		}, nil
 
@@ -416,7 +483,7 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 			return Value{}, err
 		}
 		return attachPlanAlias(v, plan), nil
-	case TypeVarchar, TypeBlob:
+	case TypeVarchar, TypeBlob, TypeBit, TypeBignum, TypeGeometry:
 		const stride = uint64(unsafe.Sizeof(abi.StringT{}))
 		if row > math.MaxUint64/stride {
 			return Value{}, fmt.Errorf("%w: string row offset overflow", ErrLimitExceeded)
@@ -437,10 +504,47 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 		if err != nil {
 			return Value{}, err
 		}
-		if plan.lt.Kind == TypeVarchar {
+		switch plan.lt.Kind {
+		case TypeVarchar:
 			return attachPlanAlias(VarcharValue(string(raw)), plan), nil
+		case TypeBlob:
+			return attachPlanAlias(Value{kind: uint8(TypeBlob), ref: raw}, plan), nil
+		case TypeBit:
+			if err := (Bit{Data: raw}).Validate(); err != nil {
+				return Value{}, err
+			}
+			return attachPlanAlias(Value{kind: uint8(TypeBit), ref: raw}, plan), nil
+		case TypeBignum:
+			if len(raw) < 3 {
+				return Value{}, fmt.Errorf("%w: truncated BIGNUM wire payload (%d bytes)", ErrInvalidInput, len(raw))
+			}
+			isNeg := raw[0]&0x80 == 0
+			mag := raw[3:]
+			if isNeg {
+				for i := range mag {
+					mag[i] = ^mag[i]
+				}
+			}
+			for len(mag) > 0 && mag[0] == 0 {
+				mag = mag[1:]
+			}
+			var neg uint64
+			if isNeg && len(mag) > 0 {
+				neg = 1
+			}
+			var owned []byte
+			if len(mag) > 0 {
+				owned = make([]byte, len(mag))
+				copy(owned, mag)
+			}
+			return attachPlanAlias(Value{kind: uint8(TypeBignum), lo: neg, ref: owned}, plan), nil
+		default: // TypeGeometry
+			var lt *LogicalType
+			if plan.lt.needsHeapMeta() {
+				lt = &plan.lt
+			}
+			return Value{kind: uint8(TypeGeometry), ref: raw, lt: lt}, nil
 		}
-		return attachPlanAlias(Value{kind: uint8(TypeBlob), ref: raw}, plan), nil
 	case TypeDate:
 		return attachPlanAlias(DateValue(Date{Days: readAt[int32](data, row)}), plan), nil
 	case TypeTime:

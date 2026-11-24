@@ -283,6 +283,11 @@ int main(void) {
 	S(struct ArrowArray);
 	O(struct ArrowArray, release);
 	O(struct ArrowArray, private_data);
+	S(duckdb_bit);
+	O(duckdb_bit, size);
+	S(duckdb_bignum);
+	O(duckdb_bignum, size);
+	O(duckdb_bignum, is_negative);
 	return 0;
 }
 `
@@ -334,6 +339,11 @@ int main(void) {
 		fmt.Sprintf("size struct ArrowArray %d %d", unsafe.Sizeof(ArrowArray{}), unsafe.Alignof(ArrowArray{})),
 		fmt.Sprintf("off struct ArrowArray.release %d", unsafe.Offsetof(ArrowArray{}.Release)),
 		fmt.Sprintf("off struct ArrowArray.private_data %d", unsafe.Offsetof(ArrowArray{}.PrivateData)),
+		fmt.Sprintf("size duckdb_bit %d %d", unsafe.Sizeof(Bit{}), unsafe.Alignof(Bit{})),
+		fmt.Sprintf("off duckdb_bit.size %d", unsafe.Offsetof(Bit{}.Size)),
+		fmt.Sprintf("size duckdb_bignum %d %d", unsafe.Sizeof(Bignum{}), unsafe.Alignof(Bignum{})),
+		fmt.Sprintf("off duckdb_bignum.size %d", unsafe.Offsetof(Bignum{}.Size)),
+		fmt.Sprintf("off duckdb_bignum.is_negative %d", unsafe.Offsetof(Bignum{}.IsNegative)),
 	}, "\n") + "\n"
 	if got != want {
 		t.Fatalf("ABI layout mismatch:\ngot C:\n%s\nwant Go:\n%s", got, want)

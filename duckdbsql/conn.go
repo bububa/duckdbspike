@@ -78,9 +78,12 @@ func (c *sqlConn) QueryContext(ctx context.Context, query string, args []driver.
 		return nil, err
 	}
 	var rows *duckdb.Rows
-	if isNamed {
+	switch {
+	case isNamed:
 		rows, err = c.conn.QueryNamed(ctx, query, named...)
-	} else {
+	case strings.ContainsRune(query, ';'):
+		rows, err = c.conn.QueryScript(ctx, query, pos...)
+	default:
 		rows, err = c.conn.Query(ctx, query, pos...)
 	}
 	if err != nil {
