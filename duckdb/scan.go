@@ -205,6 +205,13 @@ func (e *Enum) Scan(src any) error {
 	return scanExact(e, src, "duckdb.Enum")
 }
 
+func (e Enum) Value() (driver.Value, error) {
+	if e.Label == "" {
+		return nil, fmt.Errorf("%w: duckdb.Enum requires a non-empty Label", ErrInvalidInput)
+	}
+	return e.Label, nil
+}
+
 func (b *Bit) Scan(src any) error {
 	if v, ok := src.(Value); ok {
 		x, err := v.Bit()

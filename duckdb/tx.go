@@ -156,39 +156,48 @@ func (tx *Tx) QueryNamed(ctx context.Context, sql string, args ...NamedArg) (*Ro
 	return tx.conn.queryWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
-// ExecScript executes a multi-statement SQL script within tx, binding optional
-// positional args to the final statement.
+// ExecScript executes a multi-statement SQL script within tx, distributing
+// positional args across statements in declaration order.
 func (tx *Tx) ExecScript(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
 	if tx == nil || tx.conn == nil {
 		return ExecResult{}, ErrTxDone
 	}
-	return tx.conn.execScriptWithBinder(ctx, tx, sql, len(args) > 0, func(s *Stmt) error { return s.bindLocked(args) })
+	return tx.conn.execScriptWithArgs(ctx, tx, sql, newScriptArgsPos(args))
 }
 
-// ExecScriptNamed executes a multi-statement SQL script within tx, binding
-// named parameters ($name) to the final statement.
+// ExecScriptNamed executes a multi-statement SQL script within tx, routing
+// named parameters ($name) to the statements that reference them.
 func (tx *Tx) ExecScriptNamed(ctx context.Context, sql string, args ...NamedArg) (ExecResult, error) {
 	if tx == nil || tx.conn == nil {
 		return ExecResult{}, ErrTxDone
 	}
-	return tx.conn.execScriptWithBinder(ctx, tx, sql, len(args) > 0, func(s *Stmt) error { return s.bindNamedLocked(args) })
+	sa, err := newScriptArgsNamed(args)
+	if err != nil {
+		return ExecResult{}, err
+	}
+	return tx.conn.execScriptWithArgs(ctx, tx, sql, sa)
 }
 
-// QueryScript executes preceding statements and streams the final statement within tx.
+// QueryScript executes leading non-row statements and streams row-returning
+// statements within tx (additional result sets via Rows.NextResultSet).
 func (tx *Tx) QueryScript(ctx context.Context, sql string, args ...Value) (*Rows, error) {
 	if tx == nil || tx.conn == nil {
 		return nil, ErrTxDone
 	}
-	return tx.conn.queryScriptWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+	return tx.conn.queryScriptWithArgs(ctx, tx, sql, newScriptArgsPos(args))
 }
 
-// QueryScriptNamed executes preceding statements and streams the final
-// statement with named parameters ($name) within tx.
+// QueryScriptNamed executes leading non-row statements and streams
+// row-returning statements with named parameters ($name) within tx.
 func (tx *Tx) QueryScriptNamed(ctx context.Context, sql string, args ...NamedArg) (*Rows, error) {
 	if tx == nil || tx.conn == nil {
 		return nil, ErrTxDone
 	}
-	return tx.conn.queryScriptWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+	sa, err := newScriptArgsNamed(args)
+	if err != nil {
+		return nil, err
+	}
+	return tx.conn.queryScriptWithArgs(ctx, tx, sql, sa)
 }
 
 // NewAppender opens an exclusive bulk Appender within tx.

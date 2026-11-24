@@ -307,6 +307,57 @@ func assignDuckDBValue(v duckdb.Value, dst reflect.Value, depth int) error {
 		return nil
 	}
 
+	// ARRAY / LIST -> Go fixed-size array [N]T (excluding duckdb.UUID handled by sql.Scanner above).
+	if (v.Kind() == duckdb.TypeArray || v.Kind() == duckdb.TypeList) && dst.Kind() == reflect.Array && dst.Type() != reflect.TypeFor[duckdb.UUID]() {
+		var elems []duckdb.Value
+		if v.Kind() == duckdb.TypeArray {
+			av, err := v.Array()
+			if err != nil {
+				return err
+			}
+			elems = av.Elements
+		} else {
+			lv, err := v.List()
+			if err != nil {
+				return err
+			}
+			elems = lv.Elements
+		}
+		if len(elems) != dst.Len() {
+			return fmt.Errorf("%w: cannot assign %d elements into %s", duckdb.ErrTypeMismatch, len(elems), dst.Type())
+		}
+		for i, elem := range elems {
+			if err := assignDuckDBValue(elem, dst.Index(i), depth+1); err != nil {
+				return fmt.Errorf("[%d]: %w", i, err)
+			}
+		}
+		return nil
+	}
+
+	// MAP -> Go map[K]V.
+	if v.Kind() == duckdb.TypeMap && dst.Kind() == reflect.Map {
+		mv, err := v.Map()
+		if err != nil {
+			return err
+		}
+		m := reflect.MakeMapWithSize(dst.Type(), len(mv.Entries))
+		keyType := dst.Type().Key()
+		valType := dst.Type().Elem()
+		for i, entry := range mv.Entries {
+			kp := reflect.New(keyType)
+			if err := assignDuckDBValue(entry.Key, kp.Elem(), depth+1); err != nil {
+				return fmt.Errorf("map key[%d]: %w", i, err)
+			}
+			vp := reflect.New(valType)
+			if err := assignDuckDBValue(entry.Value, vp.Elem(), depth+1); err != nil {
+				return fmt.Errorf("map value[%d]: %w", i, err)
+			}
+			m.SetMapIndex(kp.Elem(), vp.Elem())
+		}
+		dst.Set(m)
+		return nil
+	}
+
 	// Direct duckdb.Value target.
 	if dst.Type() == reflect.TypeFor[duckdb.Value]() {
 		dst.Set(reflect.ValueOf(v))

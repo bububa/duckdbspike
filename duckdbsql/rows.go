@@ -17,6 +17,7 @@ type sqlRows struct {
 
 var (
 	_ driver.Rows                           = (*sqlRows)(nil)
+	_ driver.RowsNextResultSet              = (*sqlRows)(nil)
 	_ driver.RowsColumnTypeDatabaseTypeName = (*sqlRows)(nil)
 	_ driver.RowsColumnTypeScanType         = (*sqlRows)(nil)
 	_ driver.RowsColumnTypePrecisionScale   = (*sqlRows)(nil)
@@ -92,4 +93,20 @@ func (r *sqlRows) ColumnTypePrecisionScale(index int) (precision, scale int64, o
 
 func (r *sqlRows) ColumnTypeNullable(index int) (nullable, ok bool) {
 	return true, true
+}
+
+func (r *sqlRows) HasNextResultSet() bool {
+	return r.rows.HasNextResultSet()
+}
+
+func (r *sqlRows) NextResultSet() error {
+	if !r.rows.NextResultSet() {
+		if err := r.rows.Err(); err != nil {
+			return err
+		}
+		return io.EOF
+	}
+	r.columns = r.rows.Columns()
+	r.buf = r.buf[:0]
+	return nil
 }

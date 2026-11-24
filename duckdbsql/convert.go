@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -141,6 +142,19 @@ func toDuckDBValueDepth(v any, depth int) (duckdb.Value, error) {
 		return sliceToDuckDBList(rv, depth)
 	}
 
+	// Native Go fixed-size arrays (excluding duckdb.UUID handled above) bind as DuckDB ARRAY[N].
+	if rv.Kind() == reflect.Array {
+		return arrayToDuckDBArray(rv, depth)
+	}
+
+	// Native Go maps bind as DuckDB MAP(K, V).
+	if rv.Kind() == reflect.Map {
+		if rv.IsNil() {
+			return duckdb.NullValue(), nil
+		}
+		return mapToDuckDBMap(rv, depth)
+	}
+
 	return duckdb.Value{}, fmt.Errorf("%w: unsupported parameter type %T", duckdb.ErrUnsupportedType, v)
 }
 
@@ -196,6 +210,158 @@ func sliceToDuckDBList(rv reflect.Value, depth int) (duckdb.Value, error) {
 		inferred = lt
 	}
 	return duckdb.NewListValue(inferred, elems)
+}
+
+func convertElementOrStruct(ev reflect.Value, elemGoType reflect.Type, depth int) (duckdb.Value, error) {
+	dv, err := toDuckDBValueDepth(ev.Interface(), depth+1)
+	if err == nil {
+		return dv, nil
+	}
+	et := elemGoType
+	for et.Kind() == reflect.Ptr {
+		et = et.Elem()
+	}
+	if et.Kind() == reflect.Struct && !isDirectScalarStructType(et) {
+		st, stErr := encodeStructFromGo(ev, depth+1)
+		if stErr != nil {
+			return duckdb.Value{}, stErr
+		}
+		return duckdb.NewStructValue(st.Fields)
+	}
+	return duckdb.Value{}, err
+}
+
+func arrayToDuckDBArray(rv reflect.Value, depth int) (duckdb.Value, error) {
+	n := rv.Len()
+	if n == 0 {
+		return duckdb.Value{}, fmt.Errorf("%w: zero-length Go array %s cannot bind as DuckDB ARRAY", duckdb.ErrInvalidInput, rv.Type())
+	}
+	elemGoType := rv.Type().Elem()
+	elems := make([]duckdb.Value, n)
+	var inferred duckdb.LogicalType
+	for i := 0; i < n; i++ {
+		dv, err := convertElementOrStruct(rv.Index(i), elemGoType, depth)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("array[%d]: %w", i, err)
+		}
+		elems[i] = dv
+		if inferred.Kind == duckdb.TypeInvalid && !dv.IsNull() {
+			inferred = dv.Type()
+		}
+	}
+	if inferred.Kind == duckdb.TypeInvalid {
+		lt, err := inferLogicalTypeFromGoType(elemGoType, depth+1)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("%w: cannot infer DuckDB ARRAY element type for %s: %v", duckdb.ErrInvalidInput, rv.Type(), err)
+		}
+		inferred = lt
+	}
+	return duckdb.NewArrayValue(inferred, elems)
+}
+
+func compareReflectKeys(a, b reflect.Value) int {
+	switch a.Kind() {
+	case reflect.String:
+		sa, sb := a.String(), b.String()
+		if sa < sb {
+			return -1
+		}
+		if sa > sb {
+			return 1
+		}
+		return 0
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		ia, ib := a.Int(), b.Int()
+		if ia < ib {
+			return -1
+		}
+		if ia > ib {
+			return 1
+		}
+		return 0
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+		ua, ub := a.Uint(), b.Uint()
+		if ua < ub {
+			return -1
+		}
+		if ua > ub {
+			return 1
+		}
+		return 0
+	case reflect.Float32, reflect.Float64:
+		fa, fb := a.Float(), b.Float()
+		if fa < fb {
+			return -1
+		}
+		if fa > fb {
+			return 1
+		}
+		return 0
+	case reflect.Bool:
+		ba, bb := a.Bool(), b.Bool()
+		if !ba && bb {
+			return -1
+		}
+		if ba && !bb {
+			return 1
+		}
+		return 0
+	default:
+		sa, sb := fmt.Sprint(a.Interface()), fmt.Sprint(b.Interface())
+		if sa < sb {
+			return -1
+		}
+		if sa > sb {
+			return 1
+		}
+		return 0
+	}
+}
+
+func mapToDuckDBMap(rv reflect.Value, depth int) (duckdb.Value, error) {
+	keyGoType := rv.Type().Key()
+	valGoType := rv.Type().Elem()
+	keys := rv.MapKeys()
+	sort.Slice(keys, func(i, j int) bool {
+		return compareReflectKeys(keys[i], keys[j]) < 0
+	})
+	entries := make([]duckdb.MapEntry, len(keys))
+	var keyType, valType duckdb.LogicalType
+	for i, kv := range keys {
+		dk, err := convertElementOrStruct(kv, keyGoType, depth)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("map key[%d]: %w", i, err)
+		}
+		if dk.IsNull() {
+			return duckdb.Value{}, fmt.Errorf("%w: map key[%d] must not be NULL", duckdb.ErrInvalidInput, i)
+		}
+		dv, err := convertElementOrStruct(rv.MapIndex(kv), valGoType, depth)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("map value[%v]: %w", kv.Interface(), err)
+		}
+		entries[i] = duckdb.MapEntry{Key: dk, Value: dv}
+		if keyType.Kind == duckdb.TypeInvalid {
+			keyType = dk.Type()
+		}
+		if valType.Kind == duckdb.TypeInvalid && !dv.IsNull() {
+			valType = dv.Type()
+		}
+	}
+	if keyType.Kind == duckdb.TypeInvalid {
+		lt, err := inferLogicalTypeFromGoType(keyGoType, depth+1)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("%w: cannot infer DuckDB MAP key type for %s: %v", duckdb.ErrInvalidInput, rv.Type(), err)
+		}
+		keyType = lt
+	}
+	if valType.Kind == duckdb.TypeInvalid {
+		lt, err := inferLogicalTypeFromGoType(valGoType, depth+1)
+		if err != nil {
+			return duckdb.Value{}, fmt.Errorf("%w: cannot infer DuckDB MAP value type for %s: %v", duckdb.ErrInvalidInput, rv.Type(), err)
+		}
+		valType = lt
+	}
+	return duckdb.NewMapValue(keyType, valType, entries)
 }
 
 func isDirectScalarStructType(t reflect.Type) bool {
@@ -314,6 +480,25 @@ func inferLogicalTypeFromGoType(t reflect.Type, depth int) (duckdb.LogicalType, 
 			return duckdb.LogicalType{}, err
 		}
 		return duckdb.ListType(elem), nil
+	case reflect.Array:
+		if t.Len() == 0 {
+			return duckdb.LogicalType{}, fmt.Errorf("%w: zero-length Go array %s is not valid as DuckDB ARRAY", duckdb.ErrInvalidInput, t)
+		}
+		elem, err := inferLogicalTypeFromGoType(t.Elem(), depth+1)
+		if err != nil {
+			return duckdb.LogicalType{}, err
+		}
+		return duckdb.ArrayType(elem, uint64(t.Len())), nil
+	case reflect.Map:
+		kt, err := inferLogicalTypeFromGoType(t.Key(), depth+1)
+		if err != nil {
+			return duckdb.LogicalType{}, err
+		}
+		vt, err := inferLogicalTypeFromGoType(t.Elem(), depth+1)
+		if err != nil {
+			return duckdb.LogicalType{}, err
+		}
+		return duckdb.MapType(kt, vt), nil
 	case reflect.Struct:
 		if isDirectScalarStructType(t) {
 			return duckdb.LogicalType{}, fmt.Errorf("%w: ambiguous logical type for %s", duckdb.ErrInvalidInput, t)

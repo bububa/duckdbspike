@@ -40,6 +40,7 @@ type Rows struct {
 	err          error
 	done         bool
 	closed       bool
+	script       *scriptCursor
 }
 
 // Columns returns a copy of the result columns. Metadata is copied when the
@@ -121,9 +122,11 @@ func (r *Rows) Next() bool {
 				r.err = nativeError("fetch", errType, message)
 				return false
 			}
-			if !r.scope.tryFinish() {
-				r.err = r.scope.err()
-				return false
+			if !r.hasRemainingScriptLocked() {
+				if !r.scope.tryFinish() {
+					r.err = r.scope.err()
+					return false
+				}
 			}
 			r.done = true
 			return false
@@ -274,6 +277,77 @@ func (r *Rows) ColumnValue(col int) (Value, error) {
 	return v, nil
 }
 
+// HasNextResultSet reports whether this Rows cursor has additional statements
+// remaining in a multi-statement script that can be advanced with NextResultSet.
+func (r *Rows) HasNextResultSet() bool {
+	if r == nil {
+		return false
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed || r.err != nil {
+		return false
+	}
+	return r.hasRemainingScriptLocked()
+}
+
+// NextResultSet advances a multi-statement script cursor (opened via QueryScript
+// or QueryScriptNamed) to the next row-returning result set, executing any
+// intervening non-row-returning statements. It returns true if a new result set
+// is ready to iterate via Next/DecodeRow, or false when no further result sets
+// remain or on error (inspect Err).
+func (r *Rows) NextResultSet() bool {
+	if r == nil {
+		return false
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed {
+		if r.err == nil && !r.done {
+			r.err = ErrClosed
+		}
+		return false
+	}
+	if r.err != nil {
+		return false
+	}
+	if cerr := r.scope.err(); cerr != nil {
+		r.err = cerr
+		return false
+	}
+	if !r.hasRemainingScriptLocked() {
+		r.done = true
+		return false
+	}
+	return r.advanceScriptResultLocked()
+}
+
+func (r *Rows) hasRemainingScriptLocked() bool {
+	return r.script != nil && r.script.extracted != 0 && r.script.nextIdx < r.script.total
+}
+
+func (r *Rows) destroyCurrentResultLocked() {
+	api := r.conn.api
+	r.hasRow = false
+	if r.chunk != 0 {
+		api.DestroyDataChunk(&r.chunk)
+		r.chunkSize = 0
+		r.rowIdx = 0
+	}
+	api.DestroyResult(&r.result)
+	r.result = abi.Result{}
+	if r.stmt != nil {
+		s := r.stmt
+		r.stmt = nil
+		s.rows = nil
+		if r.ownsStmt {
+			s.releaseLocked()
+		}
+	}
+}
+
 // Err returns the error that ended iteration, if any. Calling Next after Close
 // records ErrClosed unless iteration had already ended.
 func (r *Rows) Err() error {
@@ -312,18 +386,12 @@ func (r *Rows) releaseLocked() {
 	r.hasRow = false
 	r.conn.endScopeLocked(r.scope)
 	api := r.conn.api
-	if r.chunk != 0 {
-		api.DestroyDataChunk(&r.chunk)
-		r.chunkSize = 0
-		r.rowIdx = 0
+	if r.script != nil {
+		r.script.destroyLocked(api)
+		r.script = nil
 	}
-	api.DestroyResult(&r.result)
+	r.destroyCurrentResultLocked()
 	if r.conn.active == r {
 		r.conn.active = nil
-	}
-	s := r.stmt
-	s.rows = nil
-	if r.ownsStmt {
-		s.releaseLocked()
 	}
 }
