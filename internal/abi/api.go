@@ -23,8 +23,21 @@ type API struct {
 	// OpenExt allocates an owned database released by Close. outError, when
 	// set, is an owned C string released by Free, on success or failure.
 	OpenExt func(path *byte, out *uintptr, config uintptr, outError *uintptr) int32
-	Close   func(database *uintptr)
-	Free    func(ptr uintptr)
+	// CreateInstanceCache allocates an owned instance cache released by
+	// DestroyInstanceCache. GetOrCreateFromCache allocates an owned database
+	// handle released by Close; outError, when set, is owned and freed by Free.
+	CreateInstanceCache  func() uintptr
+	GetOrCreateFromCache func(cache uintptr, path *byte, out *uintptr, config uintptr, outError *uintptr) int32
+	DestroyInstanceCache func(cache *uintptr)
+	Close                func(database *uintptr)
+	Free                 func(ptr uintptr)
+
+	// ErrorData* inspect an owned duckdb_error_data released by DestroyErrorData.
+	// ErrorDataMessage returns a borrowed C string valid while errorData is alive.
+	ErrorDataHasError  func(errorData uintptr) bool
+	ErrorDataErrorType func(errorData uintptr) int32
+	ErrorDataMessage   func(errorData uintptr) uintptr
+	DestroyErrorData   func(errorData *uintptr)
 
 	// Connect allocates an owned connection released by Disconnect.
 	Connect    func(database uintptr, out *uintptr) int32
@@ -47,7 +60,15 @@ type API struct {
 	Prepare        func(connection uintptr, query *byte, out *uintptr) int32
 	PrepareError   func(statement uintptr) uintptr
 	DestroyPrepare func(statement *uintptr)
-	NParams        func(statement uintptr) uint64
+	// ExtractStatements always allocates an owned extracted_statements handle
+	// released by DestroyExtracted, even when count is 0. ExtractStatementsError
+	// is borrowed from extracted. PrepareExtractedStatement always allocates an
+	// owned statement released by DestroyPrepare, even on failure.
+	ExtractStatements         func(connection uintptr, query *byte, out *uintptr) uint64
+	PrepareExtractedStatement func(connection uintptr, extracted uintptr, index uint64, out *uintptr) int32
+	ExtractStatementsError    func(extracted uintptr) uintptr
+	DestroyExtracted          func(extracted *uintptr)
+	NParams                   func(statement uintptr) uint64
 	// ParameterName returns an OWNED C string released by Free (or 0 if out of range).
 	ParameterName      func(statement uintptr, index uint64) uintptr
 	BindParameterIndex func(statement uintptr, paramIdxOut *uint64, name *byte) int32
@@ -193,6 +214,44 @@ type API struct {
 	ListVectorGetSize       func(vector uintptr) uint64
 	StructVectorGetChild    func(vector uintptr, index uint64) uintptr
 	ArrayVectorGetChild     func(vector uintptr) uintptr
+
+	// AppenderCreateExt always allocates an owned appender released by
+	// AppenderDestroy, even on failure. AppenderColumnType returns an owned
+	// logical type; AppenderErrorData returns an owned duckdb_error_data.
+	AppenderCreateExt    func(connection uintptr, catalog, schema, table *byte, out *uintptr) int32
+	AppenderColumnCount  func(appender uintptr) uint64
+	AppenderColumnType   func(appender uintptr, colIdx uint64) uintptr
+	AppenderErrorData    func(appender uintptr) uintptr
+	AppenderFlush        func(appender uintptr) int32
+	AppenderClear        func(appender uintptr) int32
+	AppenderClose        func(appender uintptr) int32
+	AppenderDestroy      func(appender *uintptr) int32
+	AppenderAddColumn    func(appender uintptr, name *byte) int32
+	AppenderClearColumns func(appender uintptr) int32
+	AppenderEndRow       func(appender uintptr) int32
+	AppendDefault        func(appender uintptr) int32
+	AppendNull           func(appender uintptr) int32
+	AppendBool           func(appender uintptr, value bool) int32
+	AppendInt8           func(appender uintptr, value int8) int32
+	AppendInt16          func(appender uintptr, value int16) int32
+	AppendInt32          func(appender uintptr, value int32) int32
+	AppendInt64          func(appender uintptr, value int64) int32
+	AppendUint8          func(appender uintptr, value uint8) int32
+	AppendUint16         func(appender uintptr, value uint16) int32
+	AppendUint32         func(appender uintptr, value uint32) int32
+	AppendUint64         func(appender uintptr, value uint64) int32
+	AppendHugeint        func(appender uintptr, value Hugeint) int32
+	AppendUhugeint       func(appender uintptr, value Uhugeint) int32
+	AppendFloat          func(appender uintptr, value float32) int32
+	AppendDouble         func(appender uintptr, value float64) int32
+	AppendDate           func(appender uintptr, value Date) int32
+	AppendTime           func(appender uintptr, value Time) int32
+	AppendTimestamp      func(appender uintptr, value Timestamp) int32
+	AppendInterval       func(appender uintptr, value Interval) int32
+	AppendVarcharLength  func(appender uintptr, val *byte, length uint64) int32
+	AppendBlob           func(appender uintptr, data *byte, length uint64) int32
+	AppendValue          func(appender uintptr, value uintptr) int32
+	AppendDataChunk      func(appender uintptr, chunk uintptr) int32
 }
 
 // symbol pairs an API field with its exported native name.
@@ -209,8 +268,15 @@ func (a *API) symbols() []symbol {
 		{&a.SetConfig, "duckdb_set_config"},
 		{&a.DestroyConfig, "duckdb_destroy_config"},
 		{&a.OpenExt, "duckdb_open_ext"},
+		{&a.CreateInstanceCache, "duckdb_create_instance_cache"},
+		{&a.GetOrCreateFromCache, "duckdb_get_or_create_from_cache"},
+		{&a.DestroyInstanceCache, "duckdb_destroy_instance_cache"},
 		{&a.Close, "duckdb_close"},
 		{&a.Free, "duckdb_free"},
+		{&a.ErrorDataHasError, "duckdb_error_data_has_error"},
+		{&a.ErrorDataErrorType, "duckdb_error_data_error_type"},
+		{&a.ErrorDataMessage, "duckdb_error_data_message"},
+		{&a.DestroyErrorData, "duckdb_destroy_error_data"},
 		{&a.Connect, "duckdb_connect"},
 		{&a.Disconnect, "duckdb_disconnect"},
 		{&a.Interrupt, "duckdb_interrupt"},
@@ -222,6 +288,10 @@ func (a *API) symbols() []symbol {
 		{&a.Prepare, "duckdb_prepare"},
 		{&a.PrepareError, "duckdb_prepare_error"},
 		{&a.DestroyPrepare, "duckdb_destroy_prepare"},
+		{&a.ExtractStatements, "duckdb_extract_statements"},
+		{&a.PrepareExtractedStatement, "duckdb_prepare_extracted_statement"},
+		{&a.ExtractStatementsError, "duckdb_extract_statements_error"},
+		{&a.DestroyExtracted, "duckdb_destroy_extracted"},
 		{&a.NParams, "duckdb_nparams"},
 		{&a.ParameterName, "duckdb_parameter_name"},
 		{&a.BindParameterIndex, "duckdb_bind_parameter_index"},
@@ -341,5 +411,39 @@ func (a *API) symbols() []symbol {
 		{&a.ListVectorGetSize, "duckdb_list_vector_get_size"},
 		{&a.StructVectorGetChild, "duckdb_struct_vector_get_child"},
 		{&a.ArrayVectorGetChild, "duckdb_array_vector_get_child"},
+		{&a.AppenderCreateExt, "duckdb_appender_create_ext"},
+		{&a.AppenderColumnCount, "duckdb_appender_column_count"},
+		{&a.AppenderColumnType, "duckdb_appender_column_type"},
+		{&a.AppenderErrorData, "duckdb_appender_error_data"},
+		{&a.AppenderFlush, "duckdb_appender_flush"},
+		{&a.AppenderClear, "duckdb_appender_clear"},
+		{&a.AppenderClose, "duckdb_appender_close"},
+		{&a.AppenderDestroy, "duckdb_appender_destroy"},
+		{&a.AppenderAddColumn, "duckdb_appender_add_column"},
+		{&a.AppenderClearColumns, "duckdb_appender_clear_columns"},
+		{&a.AppenderEndRow, "duckdb_appender_end_row"},
+		{&a.AppendDefault, "duckdb_append_default"},
+		{&a.AppendNull, "duckdb_append_null"},
+		{&a.AppendBool, "duckdb_append_bool"},
+		{&a.AppendInt8, "duckdb_append_int8"},
+		{&a.AppendInt16, "duckdb_append_int16"},
+		{&a.AppendInt32, "duckdb_append_int32"},
+		{&a.AppendInt64, "duckdb_append_int64"},
+		{&a.AppendUint8, "duckdb_append_uint8"},
+		{&a.AppendUint16, "duckdb_append_uint16"},
+		{&a.AppendUint32, "duckdb_append_uint32"},
+		{&a.AppendUint64, "duckdb_append_uint64"},
+		{&a.AppendHugeint, "duckdb_append_hugeint"},
+		{&a.AppendUhugeint, "duckdb_append_uhugeint"},
+		{&a.AppendFloat, "duckdb_append_float"},
+		{&a.AppendDouble, "duckdb_append_double"},
+		{&a.AppendDate, "duckdb_append_date"},
+		{&a.AppendTime, "duckdb_append_time"},
+		{&a.AppendTimestamp, "duckdb_append_timestamp"},
+		{&a.AppendInterval, "duckdb_append_interval"},
+		{&a.AppendVarcharLength, "duckdb_append_varchar_length"},
+		{&a.AppendBlob, "duckdb_append_blob"},
+		{&a.AppendValue, "duckdb_append_value"},
+		{&a.AppendDataChunk, "duckdb_append_data_chunk"},
 	}
 }

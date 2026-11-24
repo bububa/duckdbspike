@@ -20,16 +20,18 @@ type ExecResult struct {
 // and Rows are serialized by mu. Cancellation signals use cancelMu, which is
 // never held across a native call, so duckdb_interrupt never blocks on mu.
 type Conn struct {
-	_            noCopy
-	db           *Database
-	api          *abi.API
-	mu           sync.Mutex
-	handle       uintptr
-	closed       bool
-	limits       DecodeLimits
-	resultLimits ResultLimits
-	stmts        map[*Stmt]struct{}
-	active       *Rows
+	_              noCopy
+	db             *Database
+	api            *abi.API
+	mu             sync.Mutex
+	handle         uintptr
+	closed         bool
+	limits         DecodeLimits
+	resultLimits   ResultLimits
+	stmts          map[*Stmt]struct{}
+	active         *Rows
+	activeAppender *Appender
+	tx             *Tx
 
 	cancelMu          sync.Mutex
 	closing           bool
@@ -121,6 +123,10 @@ func (c *Conn) beginClose() {
 // Prepare compiles a single trusted SQL statement. SQL containing NUL is
 // rejected before reaching native code.
 func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
+	return c.prepareWithTx(ctx, nil, sql)
+}
+
+func (c *Conn) prepareWithTx(ctx context.Context, tx *Tx, sql string) (*Stmt, error) {
 	if c == nil {
 		return nil, ErrClosed
 	}
@@ -132,6 +138,9 @@ func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
@@ -156,16 +165,16 @@ func (c *Conn) Prepare(ctx context.Context, sql string) (*Stmt, error) {
 // (such as SET, CREATE VIEW, or CHECKPOINT). RowsAffected is copied before the
 // native result and statement are destroyed.
 func (c *Conn) Exec(ctx context.Context, sql string, args ...Value) (ExecResult, error) {
-	return c.execWithBinder(ctx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+	return c.execWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindLocked(args) })
 }
 
 // ExecNamed prepares sql, binds named parameters ($name), and runs a statement
 // that does not stream rows.
 func (c *Conn) ExecNamed(ctx context.Context, sql string, args ...NamedArg) (ExecResult, error) {
-	return c.execWithBinder(ctx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+	return c.execWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
-func (c *Conn) execWithBinder(ctx context.Context, sql string, bind func(*Stmt) error) (ExecResult, error) {
+func (c *Conn) execWithBinder(ctx context.Context, tx *Tx, sql string, bind func(*Stmt) error) (ExecResult, error) {
 	if c == nil {
 		return ExecResult{}, ErrClosed
 	}
@@ -177,6 +186,9 @@ func (c *Conn) execWithBinder(ctx context.Context, sql string, bind func(*Stmt) 
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return ExecResult{}, err
+	}
 	if err := c.usableLocked(); err != nil {
 		return ExecResult{}, err
 	}
@@ -197,16 +209,16 @@ func (c *Conn) execWithBinder(ctx context.Context, sql string, bind func(*Stmt) 
 // Rows owns both the statement and the cancellation scope, joining and
 // releasing them on Close.
 func (c *Conn) Query(ctx context.Context, sql string, args ...Value) (*Rows, error) {
-	return c.queryWithBinder(ctx, sql, func(s *Stmt) error { return s.bindLocked(args) })
+	return c.queryWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindLocked(args) })
 }
 
 // QueryNamed prepares sql, binds named parameters ($name), and starts a
 // streaming result.
 func (c *Conn) QueryNamed(ctx context.Context, sql string, args ...NamedArg) (*Rows, error) {
-	return c.queryWithBinder(ctx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
+	return c.queryWithBinder(ctx, nil, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
 
-func (c *Conn) queryWithBinder(ctx context.Context, sql string, bind func(*Stmt) error) (*Rows, error) {
+func (c *Conn) queryWithBinder(ctx context.Context, tx *Tx, sql string, bind func(*Stmt) error) (*Rows, error) {
 	if c == nil {
 		return nil, ErrClosed
 	}
@@ -218,6 +230,9 @@ func (c *Conn) queryWithBinder(ctx context.Context, sql string, bind func(*Stmt)
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
 	if err := c.usableLocked(); err != nil {
 		return nil, err
 	}
@@ -240,11 +255,21 @@ func (c *Conn) queryWithBinder(ctx context.Context, sql string, bind func(*Stmt)
 	return rows, nil
 }
 
+func (c *Conn) checkTxLocked(tx *Tx) error {
+	if tx == nil {
+		return nil
+	}
+	if tx.done || c.tx != tx {
+		return ErrTxDone
+	}
+	return nil
+}
+
 func (c *Conn) usableLocked() error {
 	if c.closed {
 		return ErrClosed
 	}
-	if c.active != nil {
+	if c.active != nil || c.activeAppender != nil {
 		return ErrBusy
 	}
 	return nil
@@ -293,6 +318,13 @@ func (c *Conn) Close() error {
 		c.closed = true
 		if c.active != nil {
 			c.active.releaseLocked()
+		}
+		if c.activeAppender != nil {
+			_ = c.activeAppender.releaseLocked()
+		}
+		if c.tx != nil {
+			c.tx.done = true
+			c.tx = nil
 		}
 		for s := range c.stmts {
 			s.releaseLocked()

@@ -249,7 +249,7 @@ tasks:
 	return result, nil
 }
 
-func (s *Stmt) execLocked(bind func() error, scope *cancelScope) (ExecResult, error) {
+func (s *Stmt) execNoFinishLocked(bind func() error, scope *cancelScope) (ExecResult, error) {
 	result, err := s.runPendingLocked(bind, scope)
 	if err != nil {
 		return ExecResult{}, err
@@ -257,10 +257,21 @@ func (s *Stmt) execLocked(bind func() error, scope *cancelScope) (ExecResult, er
 	api := s.conn.api
 	affected := api.RowsChanged(&result)
 	api.DestroyResult(&result)
+	if cerr := scope.err(); cerr != nil {
+		return ExecResult{}, cerr
+	}
+	return ExecResult{RowsAffected: affected}, nil
+}
+
+func (s *Stmt) execLocked(bind func() error, scope *cancelScope) (ExecResult, error) {
+	res, err := s.execNoFinishLocked(bind, scope)
+	if err != nil {
+		return ExecResult{}, err
+	}
 	if !scope.tryFinish() {
 		return ExecResult{}, scope.err()
 	}
-	return ExecResult{RowsAffected: affected}, nil
+	return res, nil
 }
 
 // startLocked executes the statement, validates every column's logical type

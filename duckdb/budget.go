@@ -166,6 +166,20 @@ func (bc *BudgetController) Close() {
 // duckdb_close completes). If Open fails, the reservation is released
 // immediately.
 func (bc *BudgetController) Open(ctx context.Context, lib *Library, path string, cfg InstanceConfig) (*Database, error) {
+	return bc.openWith(ctx, cfg, func(opts []Option) (*Database, error) {
+		return lib.Open(ctx, path, opts...)
+	})
+}
+
+// OpenCached behaves like Open but obtains the Database from cache instead of
+// calling Library.Open directly.
+func (bc *BudgetController) OpenCached(ctx context.Context, cache *InstanceCache, path string, cfg InstanceConfig) (*Database, error) {
+	return bc.openWith(ctx, cfg, func(opts []Option) (*Database, error) {
+		return cache.Open(ctx, path, opts...)
+	})
+}
+
+func (bc *BudgetController) openWith(ctx context.Context, cfg InstanceConfig, opener func([]Option) (*Database, error)) (*Database, error) {
 	if bc == nil {
 		return nil, ErrClosed
 	}
@@ -187,7 +201,7 @@ func (bc *BudgetController) Open(ctx context.Context, lib *Library, path string,
 	if err := bc.acquire(ctx, req); err != nil {
 		return nil, err
 	}
-	db, err := lib.Open(ctx, path, opts...)
+	db, err := opener(opts)
 	if err != nil {
 		bc.release(req)
 		return nil, err

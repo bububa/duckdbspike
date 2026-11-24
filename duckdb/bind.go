@@ -102,6 +102,9 @@ func (s *Stmt) bindNamedLocked(args []NamedArg) error {
 }
 
 func (s *Stmt) bindOneLocked(idx uint64, arg Value) error {
+	if arg.IsDefault() {
+		return fmt.Errorf("%w: DefaultValue is only valid in Appender.AppendRow", ErrInvalidInput)
+	}
 	api := s.conn.api
 	var state int32
 	if arg.IsNull() {

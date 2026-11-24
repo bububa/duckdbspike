@@ -41,6 +41,8 @@ var (
 	ErrLimitExceeded   = errors.New("duckdb: decode limit exceeded")
 	ErrBudgetExceeded  = errors.New("duckdb: resource budget exceeded")
 	ErrQueueFull       = errors.New("duckdb: query admission queue is full")
+	ErrTxDone          = errors.New("duckdb: transaction already committed or rolled back")
+	ErrTxActive        = errors.New("duckdb: connection already has an active transaction")
 
 	ErrUnsupportedPlatform = abi.ErrUnsupportedPlatform
 	ErrUnsafeLibraryPath   = abi.ErrUnsafeLibraryPath
@@ -99,6 +101,17 @@ func nativeError(op string, nativeType int32, message string) *Error {
 		message = "native call failed without a message"
 	}
 	return &Error{Op: op, Kind: kindOf(nativeType), NativeType: nativeType, Message: message}
+}
+
+func consumeErrorData(api *abi.API, op string, errData uintptr) *Error {
+	if errData == 0 {
+		return nil
+	}
+	defer api.DestroyErrorData(&errData)
+	if !api.ErrorDataHasError(errData) {
+		return nil
+	}
+	return nativeError(op, api.ErrorDataErrorType(errData), abi.GoString(api.ErrorDataMessage(errData)))
 }
 
 // noCopy makes go vet's copylocks check reject copies of handle structs. It is

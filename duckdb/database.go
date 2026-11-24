@@ -38,6 +38,7 @@ type Option struct {
 type Database struct {
 	_             noCopy
 	lib           *Library
+	cache         *InstanceCache
 	mu            sync.Mutex
 	handle        uintptr
 	closed        bool
@@ -46,6 +47,36 @@ type Database struct {
 	defaultDecode DecodeLimits
 	defaultResult ResultLimits
 	onClose       func()
+}
+
+func buildNativeConfig(api *abi.API, options []Option) (uintptr, error) {
+	var config uintptr
+	if api.CreateConfig(&config) != abi.StateSuccess {
+		if config != 0 {
+			api.DestroyConfig(&config)
+		}
+		return 0, nativeError("create_config", abi.ErrorInvalid, "")
+	}
+	for _, o := range options {
+		name, err := abi.CString(o.Name)
+		if err != nil {
+			api.DestroyConfig(&config)
+			return 0, fmt.Errorf("%w: option name: %v", ErrInvalidInput, err)
+		}
+		value, err := abi.CString(o.Value)
+		if err != nil {
+			api.DestroyConfig(&config)
+			return 0, fmt.Errorf("%w: option %s value: %v", ErrInvalidInput, o.Name, err)
+		}
+		state := api.SetConfig(config, &name[0], &value[0])
+		runtime.KeepAlive(name)
+		runtime.KeepAlive(value)
+		if state != abi.StateSuccess {
+			api.DestroyConfig(&config)
+			return 0, nativeError("set_config", abi.ErrorInvalid, fmt.Sprintf("option %q rejected", o.Name))
+		}
+	}
+	return config, nil
 }
 
 // Open opens path (":memory:" or a file path) with options applied in order.
@@ -65,30 +96,11 @@ func (l *Library) Open(ctx context.Context, path string, options ...Option) (*Da
 		return nil, fmt.Errorf("%w: path: %v", ErrInvalidInput, err)
 	}
 	api := l.api
-	var config uintptr
-	if api.CreateConfig(&config) != abi.StateSuccess {
-		if config != 0 {
-			api.DestroyConfig(&config)
-		}
-		return nil, nativeError("create_config", abi.ErrorInvalid, "")
+	config, err := buildNativeConfig(api, options)
+	if err != nil {
+		return nil, err
 	}
 	defer api.DestroyConfig(&config)
-	for _, o := range options {
-		name, err := abi.CString(o.Name)
-		if err != nil {
-			return nil, fmt.Errorf("%w: option name: %v", ErrInvalidInput, err)
-		}
-		value, err := abi.CString(o.Value)
-		if err != nil {
-			return nil, fmt.Errorf("%w: option %s value: %v", ErrInvalidInput, o.Name, err)
-		}
-		state := api.SetConfig(config, &name[0], &value[0])
-		runtime.KeepAlive(name)
-		runtime.KeepAlive(value)
-		if state != abi.StateSuccess {
-			return nil, nativeError("set_config", abi.ErrorInvalid, fmt.Sprintf("option %q rejected", o.Name))
-		}
-	}
 	var handle, errPtr uintptr
 	state := api.OpenExt(&cpath[0], &handle, config, &errPtr)
 	runtime.KeepAlive(cpath)
@@ -173,16 +185,22 @@ func (d *Database) Close() error {
 		}
 		d.mu.Lock()
 		var release func()
+		var cache *InstanceCache
 		if len(d.conns) != 0 {
 			// Unreachable by construction; keep the instance rather than free
 			// it under live connections.
 			err = errors.Join(err, fmt.Errorf("duckdb: %d connections still registered at close; database retained", len(d.conns)))
 		} else {
 			d.lib.api.Close(&d.handle)
+			cache = d.cache
+			d.cache = nil
 			release = d.onClose
 			d.onClose = nil
 		}
 		d.mu.Unlock()
+		if cache != nil {
+			cache.forget(d)
+		}
 		if release != nil {
 			release()
 		}

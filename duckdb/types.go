@@ -49,6 +49,10 @@ const (
 	TypeArray
 	TypeStruct
 	TypeMap
+
+	// typeDefault is an internal sentinel kind used exclusively by DefaultValue()
+	// to request SQL column DEFAULT evaluation in Appender.AppendRow.
+	typeDefault TypeKind = 255
 )
 
 // String returns a diagnostic name for k. It is for display and error messages
@@ -696,6 +700,14 @@ func (v Value) IsJSON() bool {
 
 // NullValue constructs an untyped SQL NULL parameter value.
 func NullValue() Value { return Value{null: true} }
+
+// DefaultValue constructs a sentinel Value instructing Appender.AppendRow to
+// insert the target column's SQL DEFAULT expression. Passing DefaultValue to
+// prepared statement parameter binding returns ErrInvalidInput.
+func DefaultValue() Value { return Value{kind: uint8(typeDefault)} }
+
+// IsDefault reports whether v is the Appender column-default sentinel.
+func (v Value) IsDefault() bool { return !v.null && TypeKind(v.kind) == typeDefault }
 
 // TypedNullValue constructs a SQL NULL carrying a column's LogicalType.
 func TypedNullValue(lt LogicalType) Value {
