@@ -344,7 +344,10 @@ type API struct {
 	// C release callback (ReleaseArrowSchema / ReleaseArrowArray).
 	// DataChunkFromArrow transfers array ownership to the returned DataChunk on
 	// success.
+	// ConnectionGetArrowOptions and ResultGetArrowOptions allocate owned
+	// options released by DestroyArrowOptions.
 	ConnectionGetArrowOptions   func(connection uintptr, out *uintptr)
+	ResultGetArrowOptions       func(result *Result) uintptr
 	DestroyArrowOptions         func(options *uintptr)
 	ToArrowSchema               func(options uintptr, types *uintptr, names *uintptr, colCount uint64, outSchema *ArrowSchema) uintptr
 	DataChunkToArrow            func(options uintptr, chunk uintptr, outArray *ArrowArray) uintptr
@@ -361,6 +364,44 @@ type API struct {
 	ArrowScan          func(connection uintptr, tableName *byte, stream *ArrowArrayStream) int32
 	ArrowArrayScan     func(connection uintptr, tableName *byte, arrowSchema *ArrowSchema, arrowArray *ArrowArray, outStream *uintptr) int32
 	DestroyArrowStream func(stream *uintptr)
+
+	// Client VFS / FileSystem (v1.5.6 stable).
+	// ClientContextGetFileSystem returns an owned duckdb_file_system released
+	// by DestroyFileSystem. CreateFileOpenOptions returns owned options released
+	// by DestroyFileOpenOptions. FileSystemOpen writes an owned file handle
+	// released by DestroyFileHandle. FileSystemErrorData and
+	// FileHandleErrorData return owned duckdb_error_data released by
+	// DestroyErrorData.
+	ClientContextGetFileSystem func(clientCtx uintptr) uintptr
+	DestroyFileSystem          func(fs *uintptr)
+	FileSystemErrorData        func(fs uintptr) uintptr
+	FileSystemOpen             func(fs uintptr, path *byte, options uintptr, outFile *uintptr) int32
+	CreateFileOpenOptions      func() uintptr
+	FileOpenOptionsSetFlag     func(options uintptr, flag int32, value bool) int32
+	DestroyFileOpenOptions     func(options *uintptr)
+	DestroyFileHandle          func(fh *uintptr)
+	FileHandleErrorData        func(fh uintptr) uintptr
+	FileHandleRead             func(fh uintptr, buf *byte, size int64) int64
+	FileHandleWrite            func(fh uintptr, buf *byte, size int64) int64
+	FileHandleTell             func(fh uintptr) int64
+	FileHandleSize             func(fh uintptr) int64
+	FileHandleSeek             func(fh uintptr, position int64) int32
+	FileHandleSync             func(fh uintptr) int32
+	FileHandleClose            func(fh uintptr) int32
+
+	// Catalog metadata inspection (v1.5.6 stable).
+	// ClientContextGetCatalog (requires an active transaction) returns an owned
+	// duckdb_catalog released by DestroyCatalog. CatalogGetEntry returns an
+	// owned duckdb_catalog_entry released by DestroyCatalogEntry.
+	// CatalogGetTypeName and CatalogEntryGetName return borrowed C strings owned
+	// by their parent handles.
+	ClientContextGetCatalog func(clientCtx uintptr, catalogName *byte) uintptr
+	CatalogGetTypeName      func(catalog uintptr) uintptr
+	CatalogGetEntry         func(catalog uintptr, clientCtx uintptr, entryType int32, schemaName *byte, entryName *byte) uintptr
+	DestroyCatalog          func(catalog *uintptr)
+	CatalogEntryGetType     func(entry uintptr) int32
+	CatalogEntryGetName     func(entry uintptr) uintptr
+	DestroyCatalogEntry     func(entry *uintptr)
 }
 
 // symbol pairs an API field with its exported native name.
@@ -615,6 +656,7 @@ func (a *API) symbols() []symbol {
 		{&a.AppendValue, "duckdb_append_value"},
 		{&a.AppendDataChunk, "duckdb_append_data_chunk"},
 		{&a.ConnectionGetArrowOptions, "duckdb_connection_get_arrow_options"},
+		{&a.ResultGetArrowOptions, "duckdb_result_get_arrow_options"},
 		{&a.DestroyArrowOptions, "duckdb_destroy_arrow_options"},
 		{&a.ToArrowSchema, "duckdb_to_arrow_schema"},
 		{&a.DataChunkToArrow, "duckdb_data_chunk_to_arrow"},
@@ -624,5 +666,28 @@ func (a *API) symbols() []symbol {
 		{&a.ArrowScan, "duckdb_arrow_scan"},
 		{&a.ArrowArrayScan, "duckdb_arrow_array_scan"},
 		{&a.DestroyArrowStream, "duckdb_destroy_arrow_stream"},
+		{&a.ClientContextGetFileSystem, "duckdb_client_context_get_file_system"},
+		{&a.DestroyFileSystem, "duckdb_destroy_file_system"},
+		{&a.FileSystemErrorData, "duckdb_file_system_error_data"},
+		{&a.FileSystemOpen, "duckdb_file_system_open"},
+		{&a.CreateFileOpenOptions, "duckdb_create_file_open_options"},
+		{&a.FileOpenOptionsSetFlag, "duckdb_file_open_options_set_flag"},
+		{&a.DestroyFileOpenOptions, "duckdb_destroy_file_open_options"},
+		{&a.DestroyFileHandle, "duckdb_destroy_file_handle"},
+		{&a.FileHandleErrorData, "duckdb_file_handle_error_data"},
+		{&a.FileHandleRead, "duckdb_file_handle_read"},
+		{&a.FileHandleWrite, "duckdb_file_handle_write"},
+		{&a.FileHandleTell, "duckdb_file_handle_tell"},
+		{&a.FileHandleSize, "duckdb_file_handle_size"},
+		{&a.FileHandleSeek, "duckdb_file_handle_seek"},
+		{&a.FileHandleSync, "duckdb_file_handle_sync"},
+		{&a.FileHandleClose, "duckdb_file_handle_close"},
+		{&a.ClientContextGetCatalog, "duckdb_client_context_get_catalog"},
+		{&a.CatalogGetTypeName, "duckdb_catalog_get_type_name"},
+		{&a.CatalogGetEntry, "duckdb_catalog_get_entry"},
+		{&a.DestroyCatalog, "duckdb_destroy_catalog"},
+		{&a.CatalogEntryGetType, "duckdb_catalog_entry_get_type"},
+		{&a.CatalogEntryGetName, "duckdb_catalog_entry_get_name"},
+		{&a.DestroyCatalogEntry, "duckdb_destroy_catalog_entry"},
 	}
 }

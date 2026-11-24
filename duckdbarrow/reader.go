@@ -54,13 +54,31 @@ func NewRecordReader(rows *duckdb.ArrowRows, alloc memory.Allocator) (array.Reco
 	return r, nil
 }
 
-// Query executes a streaming DuckDB query and returns an apache/arrow-go
-// array.RecordReader over the resulting record batches.
-func Query(ctx context.Context, conn *duckdb.Conn, alloc memory.Allocator, sql string, args ...duckdb.Value) (array.RecordReader, error) {
-	if conn == nil {
+// ArrowQuerier is satisfied by both *duckdb.Conn and *duckdb.Tx.
+type ArrowQuerier interface {
+	QueryArrow(ctx context.Context, sql string, args ...duckdb.Value) (*duckdb.ArrowRows, error)
+	QueryArrowNamed(ctx context.Context, sql string, args ...duckdb.NamedArg) (*duckdb.ArrowRows, error)
+}
+
+// ArrowScriptQuerier is satisfied by both *duckdb.Conn and *duckdb.Tx.
+type ArrowScriptQuerier interface {
+	QueryScriptArrow(ctx context.Context, sql string, args ...duckdb.Value) (*duckdb.ArrowRows, error)
+	QueryScriptArrowNamed(ctx context.Context, sql string, args ...duckdb.NamedArg) (*duckdb.ArrowRows, error)
+}
+
+// ArrowRegistrar is satisfied by both *duckdb.Conn and *duckdb.Tx.
+type ArrowRegistrar interface {
+	RegisterArrowView(ctx context.Context, name string, schema *duckdb.ArrowSchema, array *duckdb.ArrowArray) (*duckdb.ArrowView, error)
+	RegisterArrowStream(ctx context.Context, name string, provider duckdb.ArrowStreamProvider) (*duckdb.ArrowView, error)
+}
+
+// Query executes a streaming DuckDB query on conn or tx and returns an
+// apache/arrow-go array.RecordReader over the resulting record batches.
+func Query(ctx context.Context, q ArrowQuerier, alloc memory.Allocator, sql string, args ...duckdb.Value) (array.RecordReader, error) {
+	if q == nil {
 		return nil, duckdb.ErrClosed
 	}
-	rows, err := conn.QueryArrow(ctx, sql, args...)
+	rows, err := q.QueryArrow(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -68,16 +86,83 @@ func Query(ctx context.Context, conn *duckdb.Conn, alloc memory.Allocator, sql s
 }
 
 // QueryNamed executes a streaming DuckDB query with named parameters ($name)
-// and returns an apache/arrow-go array.RecordReader.
-func QueryNamed(ctx context.Context, conn *duckdb.Conn, alloc memory.Allocator, sql string, args ...duckdb.NamedArg) (array.RecordReader, error) {
-	if conn == nil {
+// on conn or tx and returns an apache/arrow-go array.RecordReader.
+func QueryNamed(ctx context.Context, q ArrowQuerier, alloc memory.Allocator, sql string, args ...duckdb.NamedArg) (array.RecordReader, error) {
+	if q == nil {
 		return nil, duckdb.ErrClosed
 	}
-	rows, err := conn.QueryArrowNamed(ctx, sql, args...)
+	rows, err := q.QueryArrowNamed(ctx, sql, args...)
 	if err != nil {
 		return nil, err
 	}
 	return NewRecordReader(rows, alloc)
+}
+
+// QueryScript executes leading statements in sql and returns an apache/arrow-go
+// array.RecordReader streaming the final statement on conn or tx.
+func QueryScript(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.Value) (array.RecordReader, error) {
+	if q == nil {
+		return nil, duckdb.ErrClosed
+	}
+	rows, err := q.QueryScriptArrow(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return NewRecordReader(rows, alloc)
+}
+
+// QueryScriptNamed executes leading statements in sql and returns an
+// apache/arrow-go array.RecordReader streaming the final statement with named
+// parameters ($name) on conn or tx.
+func QueryScriptNamed(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.NamedArg) (array.RecordReader, error) {
+	if q == nil {
+		return nil, duckdb.ErrClosed
+	}
+	rows, err := q.QueryScriptArrowNamed(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return NewRecordReader(rows, alloc)
+}
+
+// QueryStmt executes a prepared *duckdb.Stmt and returns an apache/arrow-go
+// array.RecordReader borrowing stmt until the reader is released.
+func QueryStmt(ctx context.Context, stmt *duckdb.Stmt, alloc memory.Allocator, args ...duckdb.Value) (array.RecordReader, error) {
+	if stmt == nil {
+		return nil, duckdb.ErrClosed
+	}
+	rows, err := stmt.QueryArrow(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return NewRecordReader(rows, alloc)
+}
+
+// QueryStmtNamed executes a prepared *duckdb.Stmt with named parameters ($name)
+// and returns an apache/arrow-go array.RecordReader borrowing stmt.
+func QueryStmtNamed(ctx context.Context, stmt *duckdb.Stmt, alloc memory.Allocator, args ...duckdb.NamedArg) (array.RecordReader, error) {
+	if stmt == nil {
+		return nil, duckdb.ErrClosed
+	}
+	rows, err := stmt.QueryArrowNamed(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return NewRecordReader(rows, alloc)
+}
+
+// StmtSchema inspects the Arrow *arrow.Schema of a prepared *duckdb.Stmt
+// without executing it.
+func StmtSchema(stmt *duckdb.Stmt) (*arrow.Schema, error) {
+	if stmt == nil {
+		return nil, duckdb.ErrClosed
+	}
+	raw, err := stmt.ArrowSchema()
+	if err != nil {
+		return nil, err
+	}
+	defer raw.Release()
+	return ImportSchema(raw)
 }
 
 func (r *recordReader) Retain() {

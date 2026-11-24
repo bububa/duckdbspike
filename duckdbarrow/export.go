@@ -573,12 +573,12 @@ func AppendRecordReader(app *duckdb.Appender, reader array.RecordReader) error {
 	return reader.Err()
 }
 
-// RegisterRecordBatch exports rec and registers it on conn as a temporary
-// DuckDB view named viewName via Conn.RegisterArrowView (duckdb_arrow_array_scan).
+// RegisterRecordBatch exports rec and registers it on conn or tx as a temporary
+// DuckDB view named viewName via RegisterArrowView (duckdb_arrow_array_scan).
 // Because DuckDB's underlying array-scan stream drains on first scan, the view
 // is single-use; call Close on the returned *duckdb.ArrowView when done.
-func RegisterRecordBatch(ctx context.Context, conn *duckdb.Conn, viewName string, rec arrow.RecordBatch) (*duckdb.ArrowView, error) {
-	if conn == nil {
+func RegisterRecordBatch(ctx context.Context, reg ArrowRegistrar, viewName string, rec arrow.RecordBatch) (*duckdb.ArrowView, error) {
+	if reg == nil {
 		return nil, duckdb.ErrClosed
 	}
 	if rec == nil {
@@ -593,7 +593,7 @@ func RegisterRecordBatch(ctx context.Context, conn *duckdb.Conn, viewName string
 		schema.Release()
 		return nil, err
 	}
-	view, err := conn.RegisterArrowView(ctx, viewName, schema, arr)
+	view, err := reg.RegisterArrowView(ctx, viewName, schema, arr)
 	if err != nil {
 		arr.Release()
 		schema.Release()
@@ -654,22 +654,22 @@ func (p *recordReaderStreamProvider) Close() error {
 }
 
 // RegisterRecordReader registers a multi-batch array.RecordReader as a
-// streaming temporary DuckDB SQL view named viewName via
-// Conn.RegisterArrowStream (duckdb_arrow_scan). Batches are pulled lazily as
-// DuckDB scans the view without materializing the stream into a single batch.
+// streaming temporary DuckDB SQL view named viewName on conn or tx via
+// RegisterArrowStream (duckdb_arrow_scan). Batches are pulled lazily as DuckDB
+// scans the view without materializing the stream into a single batch.
 // RegisterRecordReader retains reader and releases it when ArrowView.Close
 // (or Conn.Close) runs. See Conn.RegisterArrowStream for DuckDB v1.5.6
 // projection-pushdown caveats; for arbitrary column projections, prefer
 // AppendRecordReader into a temporary table.
-func RegisterRecordReader(ctx context.Context, conn *duckdb.Conn, viewName string, reader array.RecordReader) (*duckdb.ArrowView, error) {
-	if conn == nil {
+func RegisterRecordReader(ctx context.Context, reg ArrowRegistrar, viewName string, reader array.RecordReader) (*duckdb.ArrowView, error) {
+	if reg == nil {
 		return nil, duckdb.ErrClosed
 	}
 	if reader == nil {
 		return nil, fmt.Errorf("%w: nil Arrow RecordReader", duckdb.ErrInvalidInput)
 	}
 	reader.Retain()
-	view, err := conn.RegisterArrowStream(ctx, viewName, &recordReaderStreamProvider{reader: reader})
+	view, err := reg.RegisterArrowStream(ctx, viewName, &recordReaderStreamProvider{reader: reader})
 	if err != nil {
 		reader.Release()
 		return nil, err

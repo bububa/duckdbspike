@@ -232,3 +232,25 @@ func (tx *Tx) QueryArrowNamed(ctx context.Context, sql string, args ...NamedArg)
 	}
 	return tx.conn.queryArrowWithBinder(ctx, tx, sql, func(s *Stmt) error { return s.bindNamedLocked(args) })
 }
+
+// QueryScriptArrow executes leading statements in sql sequentially and streams
+// the final statement as an Arrow cursor within tx.
+func (tx *Tx) QueryScriptArrow(ctx context.Context, sql string, args ...Value) (*ArrowRows, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	return tx.conn.queryScriptArrowWithArgs(ctx, tx, sql, newScriptArgsPos(args))
+}
+
+// QueryScriptArrowNamed executes leading statements in sql sequentially and
+// streams the final statement as an Arrow cursor with named parameters within tx.
+func (tx *Tx) QueryScriptArrowNamed(ctx context.Context, sql string, args ...NamedArg) (*ArrowRows, error) {
+	if tx == nil || tx.conn == nil {
+		return nil, ErrTxDone
+	}
+	sa, err := newScriptArgsNamed(args)
+	if err != nil {
+		return nil, err
+	}
+	return tx.conn.queryScriptArrowWithArgs(ctx, tx, sql, sa)
+}

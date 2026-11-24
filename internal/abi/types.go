@@ -329,3 +329,27 @@ const (
 	ConfigOptionScopeSession int32 = 2
 	ConfigOptionScopeGlobal  int32 = 3
 )
+
+// File flags mirror duckdb_file_flag (v1.5.6).
+const (
+	FileFlagInvalid   int32 = 0
+	FileFlagRead      int32 = 1
+	FileFlagWrite     int32 = 2
+	FileFlagCreate    int32 = 3
+	FileFlagCreateNew int32 = 4
+	FileFlagAppend    int32 = 5
+)
+
+// Catalog entry types mirror duckdb_catalog_entry_type (v1.5.6).
+const (
+	CatalogEntryTypeInvalid           int32 = 0
+	CatalogEntryTypeTable             int32 = 1
+	CatalogEntryTypeSchema            int32 = 2
+	CatalogEntryTypeView              int32 = 3
+	CatalogEntryTypeIndex             int32 = 4
+	CatalogEntryTypePreparedStatement int32 = 5
+	CatalogEntryTypeSequence          int32 = 6
+	CatalogEntryTypeCollation         int32 = 7
+	CatalogEntryTypeType              int32 = 8
+	CatalogEntryTypeDatabase          int32 = 9
+)

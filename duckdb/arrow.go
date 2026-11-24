@@ -495,6 +495,185 @@ func (s *Stmt) QueryArrowNamed(ctx context.Context, args ...NamedArg) (*ArrowRow
 	return s.queryArrowWithBinder(ctx, func() error { return s.bindNamedLocked(args) })
 }
 
+// ArrowSchema exports an owned Apache Arrow C Data Interface ArrowSchema
+// describing the prepared statement's output columns without executing the
+// statement (using DuckDB's non-deprecated duckdb_to_arrow_schema API).
+// Callers must call Release (or Detach) on the returned schema.
+func (s *Stmt) ArrowSchema() (*ArrowSchema, error) {
+	if s == nil {
+		return nil, ErrClosed
+	}
+	c := s.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s.closed || c.closed {
+		return nil, ErrClosed
+	}
+	api := c.api
+	n := api.PreparedStatementColumnCount(s.handle)
+	if n > math.MaxInt {
+		return nil, fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, n)
+	}
+	types := make([]uintptr, int(n))
+	defer func() {
+		for i := range types {
+			if types[i] != 0 {
+				api.DestroyLogicalType(&types[i])
+			}
+		}
+	}()
+	var pinner runtime.Pinner
+	defer pinner.Unpin()
+	cnames := make([][]byte, int(n))
+	namePtrs := make([]uintptr, int(n))
+	for i := uint64(0); i < n; i++ {
+		namePtr := api.PreparedStatementColumnName(s.handle, i)
+		name := abi.GoString(namePtr)
+		if namePtr != 0 {
+			api.Free(namePtr)
+		}
+		lt := api.PreparedStatementColumnLogicalType(s.handle, i)
+		types[i] = lt
+		if _, err := buildColumnPlan(api, lt, 0, c.limits); err != nil {
+			return nil, fmt.Errorf("column %d (%q): %w", i, name, err)
+		}
+		cb, err := abi.CString(name)
+		if err != nil {
+			return nil, fmt.Errorf("%w: column %d name: %v", ErrInvalidInput, i, err)
+		}
+		cnames[int(i)] = cb
+		pinner.Pin(&cb[0])
+		namePtrs[int(i)] = uintptr(unsafe.Pointer(&cb[0]))
+	}
+	var arrowOpts uintptr
+	api.ConnectionGetArrowOptions(c.handle, &arrowOpts)
+	if arrowOpts == 0 {
+		return nil, nativeError("connection_get_arrow_options", abi.ErrorInvalid, "")
+	}
+	defer api.DestroyArrowOptions(&arrowOpts)
+
+	var typesPtr, namesPtr *uintptr
+	if n > 0 {
+		typesPtr = &types[0]
+		namesPtr = &namePtrs[0]
+	} else {
+		typesPtr = &emptyBindHandle
+		namesPtr = &emptyBindHandle
+	}
+	out := &abi.ArrowSchema{}
+	errData := api.ToArrowSchema(arrowOpts, typesPtr, namesPtr, n, out)
+	runtime.KeepAlive(types)
+	runtime.KeepAlive(cnames)
+	runtime.KeepAlive(namePtrs)
+	if err := consumeErrorData(api, "to_arrow_schema", errData); err != nil {
+		abi.ReleaseArrowSchema(out)
+		return nil, err
+	}
+	return &ArrowSchema{raw: out}, nil
+}
+
+// QueryScriptArrow executes leading statements in sql sequentially and streams
+// the final statement as an Apache Arrow C Data Interface cursor. Positional
+// args are distributed across statements in declaration order.
+func (c *Conn) QueryScriptArrow(ctx context.Context, sql string, args ...Value) (*ArrowRows, error) {
+	return c.queryScriptArrowWithArgs(ctx, nil, sql, newScriptArgsPos(args))
+}
+
+// QueryScriptArrowNamed executes leading statements in sql sequentially and
+// streams the final statement as an Apache Arrow C Data Interface cursor,
+// routing named parameters ($name) across statements.
+func (c *Conn) QueryScriptArrowNamed(ctx context.Context, sql string, args ...NamedArg) (*ArrowRows, error) {
+	sa, err := newScriptArgsNamed(args)
+	if err != nil {
+		return nil, err
+	}
+	return c.queryScriptArrowWithArgs(ctx, nil, sql, sa)
+}
+
+func (c *Conn) queryScriptArrowWithArgs(ctx context.Context, tx *Tx, sql string, args *scriptArgs) (*ArrowRows, error) {
+	if c == nil {
+		return nil, ErrClosed
+	}
+	if ctx == nil {
+		return nil, fmt.Errorf("%w: nil context", ErrInvalidInput)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	csql, err := abi.CString(sql)
+	if err != nil {
+		return nil, fmt.Errorf("%w: sql: %v", ErrInvalidInput, err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return nil, err
+	}
+	if err := c.usableLocked(); err != nil {
+		return nil, err
+	}
+	scope, err := c.beginScopeLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	api := c.api
+	var extracted uintptr
+	count := api.ExtractStatements(c.handle, &csql[0], &extracted)
+	runtime.KeepAlive(csql)
+	if count == 0 {
+		msg := abi.GoString(api.ExtractStatementsError(extracted))
+		if extracted != 0 {
+			api.DestroyExtracted(&extracted)
+		}
+		cerr := scope.err()
+		c.endScopeLocked(scope)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if msg != "" {
+			return nil, nativeError("extract_statements", abi.ErrorInvalid, msg)
+		}
+		return nil, fmt.Errorf("%w: script contains no statements", ErrInvalidInput)
+	}
+
+	for i := uint64(0); i < count-1; i++ {
+		if cerr := scope.err(); cerr != nil {
+			api.DestroyExtracted(&extracted)
+			c.endScopeLocked(scope)
+			return nil, cerr
+		}
+		s, err := c.prepareExtractedLocked(extracted, i, scope)
+		if err != nil {
+			api.DestroyExtracted(&extracted)
+			c.endScopeLocked(scope)
+			return nil, err
+		}
+		_, execErr := s.execNoFinishLocked(func() error { return args.bindStmtLocked(s, false) }, scope)
+		s.releaseLocked()
+		if execErr != nil {
+			api.DestroyExtracted(&extracted)
+			c.endScopeLocked(scope)
+			return nil, execErr
+		}
+	}
+
+	lastStmt, err := c.prepareExtractedLocked(extracted, count-1, scope)
+	api.DestroyExtracted(&extracted)
+	if err != nil {
+		c.endScopeLocked(scope)
+		return nil, err
+	}
+	ar, err := lastStmt.startArrowLocked(func() error { return args.bindStmtLocked(lastStmt, true) }, scope)
+	if err != nil {
+		lastStmt.releaseLocked()
+		c.endScopeLocked(scope)
+		return nil, err
+	}
+	ar.ownsStmt = true
+	return ar, nil
+}
+
 func (s *Stmt) queryArrowWithBinder(ctx context.Context, bind func() error) (*ArrowRows, error) {
 	if s == nil {
 		return nil, ErrClosed
@@ -559,10 +738,15 @@ func (s *Stmt) startArrowLocked(bind func() error, scope *cancelScope) (*ArrowRo
 		columns[i] = Column{Name: name, Type: plan.lt}
 	}
 	var arrowOpts uintptr
-	api.ConnectionGetArrowOptions(s.conn.handle, &arrowOpts)
+	if api.ResultGetArrowOptions != nil {
+		arrowOpts = api.ResultGetArrowOptions(&result)
+	}
+	if arrowOpts == 0 {
+		api.ConnectionGetArrowOptions(s.conn.handle, &arrowOpts)
+	}
 	if arrowOpts == 0 {
 		api.DestroyResult(&result)
-		return nil, nativeError("connection_get_arrow_options", abi.ErrorInvalid, "")
+		return nil, nativeError("result_get_arrow_options", abi.ErrorInvalid, "")
 	}
 	if cerr := scope.err(); cerr != nil {
 		api.DestroyArrowOptions(&arrowOpts)
