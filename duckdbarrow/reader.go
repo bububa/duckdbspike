@@ -21,13 +21,32 @@ type recordReader struct {
 	err      error
 }
 
-var _ array.RecordReader = (*recordReader)(nil)
+// ScriptRecordReader extends apache/arrow-go's array.RecordReader with
+// multi-result-set navigation for multi-statement SQL scripts.
+type ScriptRecordReader interface {
+	array.RecordReader
+	HasNextResultSet() bool
+	NextResultSet() bool
+}
+
+var (
+	_ array.RecordReader = (*recordReader)(nil)
+	_ ScriptRecordReader = (*recordReader)(nil)
+)
 
 // NewRecordReader wraps a streaming *duckdb.ArrowRows in an apache/arrow-go
 // array.RecordReader. Ownership of rows transfers to the returned RecordReader,
 // which closes rows when its reference count drops to zero (or immediately if
 // initialization fails).
 func NewRecordReader(rows *duckdb.ArrowRows, alloc memory.Allocator) (array.RecordReader, error) {
+	return NewScriptRecordReader(rows, alloc)
+}
+
+// NewScriptRecordReader wraps a streaming *duckdb.ArrowRows in a
+// ScriptRecordReader supporting both array.RecordReader iteration and
+// multi-result-set navigation (HasNextResultSet / NextResultSet). Ownership of
+// rows transfers to the returned reader.
+func NewScriptRecordReader(rows *duckdb.ArrowRows, alloc memory.Allocator) (ScriptRecordReader, error) {
 	if rows == nil {
 		return nil, fmt.Errorf("%w: nil ArrowRows", duckdb.ErrInvalidInput)
 	}
@@ -98,9 +117,11 @@ func QueryNamed(ctx context.Context, q ArrowQuerier, alloc memory.Allocator, sql
 	return NewRecordReader(rows, alloc)
 }
 
-// QueryScript executes leading statements in sql and returns an apache/arrow-go
-// array.RecordReader streaming the final statement on conn or tx.
-func QueryScript(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.Value) (array.RecordReader, error) {
+// QueryScript executes leading non-row statements in sql and returns a
+// ScriptRecordReader (which embeds array.RecordReader) streaming row-returning
+// statements on conn or tx. Additional row-returning statements in sql can be
+// consumed via HasNextResultSet and NextResultSet.
+func QueryScript(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.Value) (ScriptRecordReader, error) {
 	if q == nil {
 		return nil, duckdb.ErrClosed
 	}
@@ -108,13 +129,14 @@ func QueryScript(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocat
 	if err != nil {
 		return nil, err
 	}
-	return NewRecordReader(rows, alloc)
+	return NewScriptRecordReader(rows, alloc)
 }
 
-// QueryScriptNamed executes leading statements in sql and returns an
-// apache/arrow-go array.RecordReader streaming the final statement with named
-// parameters ($name) on conn or tx.
-func QueryScriptNamed(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.NamedArg) (array.RecordReader, error) {
+// QueryScriptNamed executes leading non-row statements in sql and returns a
+// ScriptRecordReader (which embeds array.RecordReader) streaming row-returning
+// statements with named parameters ($name) on conn or tx. Additional result
+// sets can be consumed via HasNextResultSet and NextResultSet.
+func QueryScriptNamed(ctx context.Context, q ArrowScriptQuerier, alloc memory.Allocator, sql string, args ...duckdb.NamedArg) (ScriptRecordReader, error) {
 	if q == nil {
 		return nil, duckdb.ErrClosed
 	}
@@ -122,7 +144,7 @@ func QueryScriptNamed(ctx context.Context, q ArrowScriptQuerier, alloc memory.Al
 	if err != nil {
 		return nil, err
 	}
-	return NewRecordReader(rows, alloc)
+	return NewScriptRecordReader(rows, alloc)
 }
 
 // QueryStmt executes a prepared *duckdb.Stmt and returns an apache/arrow-go
@@ -222,4 +244,40 @@ func (r *recordReader) Record() arrow.RecordBatch {
 
 func (r *recordReader) Err() error {
 	return r.err
+}
+
+func (r *recordReader) HasNextResultSet() bool {
+	if r.rows == nil || r.err != nil {
+		return false
+	}
+	return r.rows.HasNextResultSet()
+}
+
+func (r *recordReader) NextResultSet() bool {
+	if r.cur != nil {
+		r.cur.Release()
+		r.cur = nil
+	}
+	if r.rows == nil || r.err != nil {
+		return false
+	}
+	if !r.rows.NextResultSet() {
+		if err := r.rows.Err(); err != nil {
+			r.err = err
+		}
+		return false
+	}
+	rawSchema, err := r.rows.Schema()
+	if err != nil {
+		r.err = err
+		return false
+	}
+	schema, err := ImportSchema(rawSchema)
+	rawSchema.Release()
+	if err != nil {
+		r.err = err
+		return false
+	}
+	r.schema = schema
+	return true
 }

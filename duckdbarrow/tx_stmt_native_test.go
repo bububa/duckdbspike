@@ -150,4 +150,89 @@ func TestNativeArrowTxStmtAndScriptHelpers(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+
+	// 3. Multi-result-set ScriptRecordReader via QueryScript & QueryScriptNamed.
+	multiRR, err := duckdbarrow.QueryScript(ctx, conn, alloc, `
+		CREATE TEMP TABLE arrow_mrs (id INT, label VARCHAR);
+		INSERT INTO arrow_mrs VALUES (1, 'one'), (2, 'two');
+		SELECT id FROM arrow_mrs WHERE id >= ? ORDER BY id;
+		SELECT label FROM arrow_mrs WHERE id = ?;
+		INSERT INTO arrow_mrs VALUES (3, 'three');
+	`, duckdb.Int32Value(1), duckdb.Int32Value(2))
+	if err != nil {
+		t.Fatalf("QueryScript multi: %v", err)
+	}
+	if multiRR.Schema().NumFields() != 1 || multiRR.Schema().Field(0).Name != "id" || multiRR.Schema().Field(0).Type.ID() != arrow.INT32 {
+		multiRR.Release()
+		t.Fatalf("RS1 schema = %v, want [id:int32]", multiRR.Schema())
+	}
+	var gotIDs []int32
+	for multiRR.Next() {
+		col := multiRR.RecordBatch().Column(0).(*array.Int32)
+		for i := range col.Len() {
+			gotIDs = append(gotIDs, col.Value(i))
+		}
+	}
+	if err := multiRR.Err(); err != nil {
+		multiRR.Release()
+		t.Fatalf("RS1 err: %v", err)
+	}
+	if len(gotIDs) != 2 || gotIDs[0] != 1 || gotIDs[1] != 2 {
+		multiRR.Release()
+		t.Fatalf("RS1 ids = %v, want [1 2]", gotIDs)
+	}
+	if !multiRR.HasNextResultSet() {
+		multiRR.Release()
+		t.Fatal("expected HasNextResultSet == true after RS1")
+	}
+	if !multiRR.NextResultSet() {
+		err := multiRR.Err()
+		multiRR.Release()
+		t.Fatalf("NextResultSet to RS2 returned false (err=%v)", err)
+	}
+	if multiRR.Schema().NumFields() != 1 || multiRR.Schema().Field(0).Name != "label" || multiRR.Schema().Field(0).Type.ID() != arrow.STRING {
+		multiRR.Release()
+		t.Fatalf("RS2 schema = %v, want [label:utf8]", multiRR.Schema())
+	}
+	var gotLabels []string
+	for multiRR.Next() {
+		col := multiRR.RecordBatch().Column(0).(*array.String)
+		for i := range col.Len() {
+			gotLabels = append(gotLabels, col.Value(i))
+		}
+	}
+	if err := multiRR.Err(); err != nil {
+		multiRR.Release()
+		t.Fatalf("RS2 err: %v", err)
+	}
+	if len(gotLabels) != 1 || gotLabels[0] != "two" {
+		multiRR.Release()
+		t.Fatalf("RS2 labels = %v, want [two]", gotLabels)
+	}
+	// Advancing past RS2 runs trailing INSERT and returns false cleanly.
+	if multiRR.NextResultSet() {
+		multiRR.Release()
+		t.Fatal("expected NextResultSet == false after trailing INSERT")
+	}
+	if err := multiRR.Err(); err != nil {
+		multiRR.Release()
+		t.Fatalf("trailing INSERT err: %v", err)
+	}
+	multiRR.Release()
+
+	// Verify trailing INSERT executed via QueryScriptNamed multi-result-set.
+	namedRR, err := duckdbarrow.QueryScriptNamed(ctx, conn, alloc, `
+		SELECT count(*)::BIGINT AS cnt FROM arrow_mrs;
+		SELECT label FROM arrow_mrs WHERE id = $target;
+	`, duckdb.Named("target", duckdb.Int32Value(3)))
+	if err != nil {
+		t.Fatalf("QueryScriptNamed multi: %v", err)
+	}
+	defer namedRR.Release()
+	if !namedRR.Next() || namedRR.RecordBatch().Column(0).(*array.Int64).Value(0) != 3 {
+		t.Fatalf("expected count=3 after trailing INSERT (err=%v)", namedRR.Err())
+	}
+	if !namedRR.NextResultSet() || !namedRR.Next() || namedRR.RecordBatch().Column(0).(*array.String).Value(0) != "three" {
+		t.Fatalf("expected RS2 label='three' (err=%v)", namedRR.Err())
+	}
 }

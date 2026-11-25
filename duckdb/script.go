@@ -260,7 +260,11 @@ func (c *Conn) execScriptWithArgs(ctx context.Context, tx *Tx, sql string, args 
 		return ExecResult{}, nil
 	}
 
-	var totalAffected uint64
+	var (
+		totalAffected  uint64
+		lastStmtType   StatementType
+		lastReturnType ResultType
+	)
 	for i := range count {
 		if cerr := scope.err(); cerr != nil {
 			return ExecResult{}, cerr
@@ -277,11 +281,17 @@ func (c *Conn) execScriptWithArgs(ctx context.Context, tx *Tx, sql string, args 
 			return ExecResult{}, execErr
 		}
 		totalAffected += res.RowsAffected
+		lastStmtType = res.StatementType
+		lastReturnType = res.ReturnType
 	}
 	if !scope.tryFinish() {
 		return ExecResult{}, scope.err()
 	}
-	return ExecResult{RowsAffected: totalAffected}, nil
+	return ExecResult{
+		RowsAffected:  totalAffected,
+		StatementType: lastStmtType,
+		ReturnType:    lastReturnType,
+	}, nil
 }
 
 // QueryScript extracts all statements in sql, auto-executes leading non-row

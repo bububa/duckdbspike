@@ -207,6 +207,19 @@ func TestResultTypeStringAndArrowRowsMetadataMock(t *testing.T) {
 	}
 	_ = rows.Close()
 
+	// ExecResult captures StatementType and ReturnType alongside RowsAffected.
+	api.ResultStatementType = func(abi.Result) int32 { return abi.StatementTypeInsert }
+	api.ResultReturnType = func(abi.Result) int32 { return abi.ResultTypeChangedRows }
+	eres, err := conn.Exec(ctx, "INSERT INTO t VALUES (1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if eres.RowsAffected != 5 || eres.StatementType != StatementTypeInsert || eres.ReturnType != ResultTypeChangedRows {
+		t.Fatalf("ExecResult = %+v, want {RowsAffected:5 StatementType:INSERT ReturnType:CHANGED_ROWS}", eres)
+	}
+	api.ResultStatementType = func(abi.Result) int32 { return abi.StatementTypeSelect }
+	api.ResultReturnType = func(abi.Result) int32 { return abi.ResultTypeQueryResult }
+
 	ar, err := conn.QueryArrow(ctx, "SELECT 1")
 	if err != nil {
 		t.Fatal(err)

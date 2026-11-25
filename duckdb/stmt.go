@@ -257,11 +257,25 @@ func (s *Stmt) execNoFinishLocked(bind func() error, scope *cancelScope) (ExecRe
 	}
 	api := s.conn.api
 	affected := api.RowsChanged(&result)
+	var stmtType StatementType
+	if api.ResultStatementType != nil {
+		stmtType = StatementType(api.ResultStatementType(result))
+	} else if api.PreparedStatementType != nil {
+		stmtType = StatementType(api.PreparedStatementType(s.handle))
+	}
+	var returnType ResultType
+	if api.ResultReturnType != nil {
+		returnType = ResultType(api.ResultReturnType(result))
+	}
 	api.DestroyResult(&result)
 	if cerr := scope.err(); cerr != nil {
 		return ExecResult{}, cerr
 	}
-	return ExecResult{RowsAffected: affected}, nil
+	return ExecResult{
+		RowsAffected:  affected,
+		StatementType: stmtType,
+		ReturnType:    returnType,
+	}, nil
 }
 
 func (s *Stmt) execLocked(bind func() error, scope *cancelScope) (ExecResult, error) {

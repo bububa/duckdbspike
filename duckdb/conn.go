@@ -10,10 +10,12 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
-// ExecResult holds copied metadata from a non-row statement (DDL, SET,
-// CHECKPOINT, DML). All native resources are released before Exec returns.
+// ExecResult holds copied metadata from a non-row statement or script (DDL,
+// SET, CHECKPOINT, DML). All native resources are released before Exec returns.
 type ExecResult struct {
-	RowsAffected uint64
+	RowsAffected  uint64
+	StatementType StatementType
+	ReturnType    ResultType
 }
 
 // Conn owns one native connection. All native calls on a Conn and on its Stmts

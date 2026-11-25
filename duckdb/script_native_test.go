@@ -187,4 +187,34 @@ func TestNativeMultiResultSetAndScriptParamDistribution(t *testing.T) {
 	if n, _ := verifyRow[0].Int32(); n != 123 {
 		t.Fatalf("conn reuse = %d, want 123", n)
 	}
+
+	// 5. ExecResult exposes StatementType and ReturnType on Exec and ExecScript.
+	ddlRes, err := conn.Exec(ctx, `CREATE TEMP TABLE exec_meta_t (id INT, v VARCHAR)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ddlRes.StatementType != duckdb.StatementTypeCreate || ddlRes.ReturnType != duckdb.ResultTypeNothing {
+		t.Fatalf("CREATE ExecResult = %+v, want (CREATE, NOTHING)", ddlRes)
+	}
+	insRes, err := conn.Exec(ctx, `INSERT INTO exec_meta_t VALUES (1, 'a'), (2, 'b')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if insRes.RowsAffected != 2 || insRes.StatementType != duckdb.StatementTypeInsert || insRes.ReturnType != duckdb.ResultTypeChangedRows {
+		t.Fatalf("INSERT ExecResult = %+v, want (2, INSERT, CHANGED_ROWS)", insRes)
+	}
+	updRes, err := conn.Exec(ctx, `UPDATE exec_meta_t SET v = 'z' WHERE id = 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updRes.RowsAffected != 1 || updRes.StatementType != duckdb.StatementTypeUpdate || updRes.ReturnType != duckdb.ResultTypeChangedRows {
+		t.Fatalf("UPDATE ExecResult = %+v, want (1, UPDATE, CHANGED_ROWS)", updRes)
+	}
+	scrRes, err := conn.ExecScript(ctx, `INSERT INTO exec_meta_t VALUES (3, 'c'); DELETE FROM exec_meta_t WHERE id = 2;`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scrRes.RowsAffected != 2 || scrRes.StatementType != duckdb.StatementTypeDelete || scrRes.ReturnType != duckdb.ResultTypeChangedRows {
+		t.Fatalf("ExecScript ExecResult = %+v, want (2, DELETE, CHANGED_ROWS)", scrRes)
+	}
 }
