@@ -17,13 +17,13 @@ Pure-Go (`CGO_ENABLED=0`) [`purego`](https://github.com/ebitengine/purego) bindi
   - `types.go` — `PinnedVersion`, C struct mirrors (`Result`, `Hugeint`, `Uhugeint`, `Decimal`, `StringT`, `ListEntry`, `Bit`, `Bignum`, `ArrowSchema`, `ArrowArray`, `ArrowArrayStream`, temporal types), and C enum constants.
   - `api.go` — Complete `API` function-pointer table with ownership annotations (`owned` vs `borrowed`) and `symbols()` registry.
   - `arrow_export.go` — 6 process-wide singleton `purego.NewCallback` trampolines (schema/array release + 4 Arrow C Stream Interface callbacks) with handle-ID `sync.Map` dispatch.
-  - `load.go` — `Load(path, wantSHA256)`: platform gate, path/permission checks, SHA-256 verification, atomic all-or-nothing symbol resolution, and `PinnedVersion` check.
+  - `load.go` / `manifest.go` — `Load(path, wantSHA256)`, `CheckLibraryCandidate`, and the pinned per-platform artifact manifest (`ArtifactFor`, `CurrentArtifact`): platform gate, path/permission checks, SHA-256 verification, atomic all-or-nothing symbol resolution, and `PinnedVersion` check.
   - `platform_accepted.go` / `platform_windows_amd64.go` / `platform_other.go` — Build-tag gate (`darwin/arm64`, `linux/amd64`, `linux/arm64`, `windows/amd64`) and native library openers (`purego.Dlopen` on Unix, `syscall.LoadLibrary` on Windows).
   - `perms_unix.go` / `perms_windows.go` — OS-specific library path/permission guards (POSIX `0o022` check on Unix, UNC path rejection on Windows).
   - `abi_test.go` — Symbol coverage check, loader validation tests, singleton callback tests, C header layout probe (`DUCKDB_HEADER_DIR`), and native load test.
 - `duckdb/` — Public Go API and resource/safety kernel.
   - `doc.go` — Package docs, sentinel errors, `Error`/`ErrorKind`, `noCopy`.
-  - `database.go` / `cache.go` — `Library`, `Database`, `InstanceCache`, `Option`, `Load`, `Open`, `Close`.
+  - `database.go` / `cache.go` / `autoload.go` / `autoload_paths_*.go` — `Library`, `Database`, `InstanceCache`, `Option`, `Load`, `AutoLoad` (cross-platform multi-path discovery + verified atomic download), `Open`, `Close`.
   - `conn.go` / `tx.go` / `stmt.go` / `rows.go` / `script.go` — `Conn`, `Tx`, `Stmt`, streaming `Rows` (with `HasNextResultSet`/`NextResultSet` and `StatementType`), and multi-statement script execution with parameter distribution.
   - `bind.go` / `decode.go` / `value_decode.go` / `variant.go` / `types.go` / `scan.go` — Compact 48-byte `Value`, exact typed parameter binding, vector & `duckdb_value` decoding, read-only recursive DuckDB `v1.5.6` `VARIANT` decoder, generic `ValueAs[T]`/`ConfigOptionAs[T]`, `sql.Scanner`/`driver.Valuer`, and `DecodeLimits`.
   - `appender.go` / `appender_chunk.go` — Chunk-buffered (2,048-row `DataChunk`) `Appender` (`AppendRow`, `AppendRows`, `AddColumn`, `ClearColumns`, `AppendArrowChunk`) and `QueryAppender`.
@@ -83,5 +83,5 @@ Notes:
 ## Upgrading `abi.PinnedVersion`
 
 1. Update `abi.PinnedVersion` in `internal/abi/types.go` (and any changed ABI structs/symbols in `internal/abi/`).
-2. Update the approved artifact and SHA-256 table in `README.md` and `.github/workflows/go.yml`.
+2. Update the approved artifact and SHA-256 entries in `internal/abi/manifest.go`, `README.md`, and `.github/workflows/go.yml`.
 3. Run both the `CGO_ENABLED=0` and `-race` native verification commands above on every accepted platform.

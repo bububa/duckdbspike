@@ -25,6 +25,37 @@ var (
 	ErrLibraryOpen         = errors.New("duckdb: native library cannot be opened")
 )
 
+// ValidateSHA256Hex verifies that s is a 64-character lowercase hex SHA-256
+// digest, returning ErrChecksumMismatch otherwise.
+func ValidateSHA256Hex(s string) error {
+	if !isSHA256Hex(s) {
+		return fmt.Errorf("%w: expected 64 lowercase hex digits, got %q", ErrChecksumMismatch, s)
+	}
+	return nil
+}
+
+// CheckLibraryCandidate verifies path's safety, permissions, symlink target,
+// regular-file status, and SHA-256 digest against wantSHA256 without opening
+// or mapping the native library. It returns the resolved canonical path on
+// success.
+func CheckLibraryCandidate(path, wantSHA256 string) (string, error) {
+	if err := ValidateSHA256Hex(wantSHA256); err != nil {
+		return "", err
+	}
+	resolved, err := checkLibraryPath(path)
+	if err != nil {
+		return "", err
+	}
+	got, err := fileSHA256(resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrLibraryOpen, err)
+	}
+	if got != wantSHA256 {
+		return "", fmt.Errorf("%w: %s has %s, want %s", ErrChecksumMismatch, resolved, got, wantSHA256)
+	}
+	return resolved, nil
+}
+
 // Load verifies and opens the approved native library at path and resolves the
 // complete API table. The library stays mapped for the life of the process;
 // there is deliberately no unload.
@@ -38,19 +69,9 @@ func Load(path, wantSHA256 string) (*API, error) {
 	if !platformAccepted() {
 		return nil, fmt.Errorf("%w: %s/%s", ErrUnsupportedPlatform, runtime.GOOS, runtime.GOARCH)
 	}
-	if !isSHA256Hex(wantSHA256) {
-		return nil, fmt.Errorf("%w: expected 64 lowercase hex digits, got %q", ErrChecksumMismatch, wantSHA256)
-	}
-	resolved, err := checkLibraryPath(path)
+	resolved, err := CheckLibraryCandidate(path, wantSHA256)
 	if err != nil {
 		return nil, err
-	}
-	got, err := fileSHA256(resolved)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrLibraryOpen, err)
-	}
-	if got != wantSHA256 {
-		return nil, fmt.Errorf("%w: %s has %s, want %s", ErrChecksumMismatch, resolved, got, wantSHA256)
 	}
 	lookup, err := openLibrary(resolved)
 	if err != nil {

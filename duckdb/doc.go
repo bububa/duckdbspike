@@ -29,6 +29,9 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
+// PinnedVersion is the single native DuckDB release accepted by this package.
+const PinnedVersion = abi.PinnedVersion
+
 // Sentinel errors.
 var (
 	ErrClosed          = errors.New("duckdb: handle is closed")
@@ -44,6 +47,7 @@ var (
 	ErrQueueFull       = errors.New("duckdb: query admission queue is full")
 	ErrTxDone          = errors.New("duckdb: transaction already committed or rolled back")
 	ErrTxActive        = errors.New("duckdb: connection already has an active transaction")
+	ErrLibraryNotFound = errors.New("duckdb: matching native library not found")
 
 	ErrUnsupportedPlatform = abi.ErrUnsupportedPlatform
 	ErrUnsafeLibraryPath   = abi.ErrUnsafeLibraryPath
