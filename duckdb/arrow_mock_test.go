@@ -166,3 +166,68 @@ func TestArrowRowsMockLifecycleReleaseDetachAndZeroLeaks(t *testing.T) {
 	_ = db.Close()
 	f.assertZeroLeaks(t)
 }
+
+func TestResultTypeStringAndArrowRowsMetadataMock(t *testing.T) {
+	if ResultTypeInvalid.String() != "INVALID" ||
+		ResultTypeChangedRows.String() != "CHANGED_ROWS" ||
+		ResultTypeNothing.String() != "NOTHING" ||
+		ResultTypeQueryResult.String() != "QUERY_RESULT" ||
+		ResultType(99).String() != "RESULT_TYPE(99)" {
+		t.Fatalf("unexpected ResultType.String() outputs")
+	}
+
+	f, lib := newFakeNative(t)
+	api := lib.api
+	api.ResultStatementType = func(abi.Result) int32 { return abi.StatementTypeSelect }
+	api.ResultReturnType = func(abi.Result) int32 { return abi.ResultTypeQueryResult }
+	api.RowsChanged = func(*abi.Result) uint64 { return 5 }
+	api.ConnectionGetArrowOptions = func(uintptr, *uintptr) {}
+	api.ResultGetArrowOptions = func(*abi.Result) uintptr { return 77 }
+	api.DestroyArrowOptions = func(p *uintptr) { *p = 0 }
+	f.chunkSizes = []uint64{}
+
+	ctx := context.Background()
+	db, err := lib.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.Query(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.ReturnType() != ResultTypeQueryResult || rows.StatementType() != StatementTypeSelect {
+		t.Fatalf("Rows metadata = (%v, %v)", rows.ReturnType(), rows.StatementType())
+	}
+	_ = rows.Close()
+
+	ar, err := conn.QueryArrow(ctx, "SELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ar.ReturnType() != ResultTypeQueryResult || ar.StatementType() != StatementTypeSelect || ar.RowsAffected() != 5 {
+		t.Fatalf("ArrowRows metadata = (%v, %v, %d)", ar.ReturnType(), ar.StatementType(), ar.RowsAffected())
+	}
+	if ar.HasNextResultSet() || ar.NextResultSet() {
+		t.Fatal("single-statement ArrowRows should have no next result set")
+	}
+	_ = ar.Close()
+
+	// Nil receiver guards.
+	var nilRows *Rows
+	var nilAR *ArrowRows
+	if nilRows.ReturnType() != ResultTypeInvalid ||
+		nilAR.ReturnType() != ResultTypeInvalid ||
+		nilAR.StatementType() != StatementTypeInvalid ||
+		nilAR.RowsAffected() != 0 ||
+		nilAR.HasNextResultSet() ||
+		nilAR.NextResultSet() {
+		t.Fatal("nil receiver guards failed")
+	}
+}

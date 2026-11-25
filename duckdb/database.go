@@ -43,6 +43,8 @@ type Database struct {
 	handle        uintptr
 	closed        bool
 	conns         map[*Conn]struct{}
+	taskStates    map[*TaskState]struct{}
+	execTasksWG   sync.WaitGroup
 	once          sync.Once
 	defaultDecode DecodeLimits
 	defaultResult ResultLimits
@@ -175,22 +177,35 @@ func (d *Database) Close() error {
 		for c := range d.conns {
 			conns = append(conns, c)
 		}
+		tasks := make([]*TaskState, 0, len(d.taskStates))
+		for ts := range d.taskStates {
+			tasks = append(tasks, ts)
+		}
 		d.mu.Unlock()
-		// Interrupt all active queries across connections first so shutdown
-		// drains concurrent native calls in parallel rather than serially.
+		// Interrupt all active queries across connections and wake external
+		// task workers first so shutdown drains concurrent native calls in
+		// parallel rather than serially.
 		for _, c := range conns {
 			c.beginClose()
+		}
+		for _, ts := range tasks {
+			ts.Finish()
 		}
 		for _, c := range conns {
 			err = errors.Join(err, c.Close())
 		}
+		for _, ts := range tasks {
+			err = errors.Join(err, ts.Close())
+		}
+		// Wait for any in-flight Database.ExecuteTasks calls before duckdb_close.
+		d.execTasksWG.Wait()
 		d.mu.Lock()
 		var release func()
 		var cache *InstanceCache
-		if len(d.conns) != 0 {
+		if len(d.conns) != 0 || len(d.taskStates) != 0 {
 			// Unreachable by construction; keep the instance rather than free
-			// it under live connections.
-			err = errors.Join(err, fmt.Errorf("duckdb: %d connections still registered at close; database retained", len(d.conns)))
+			// it under live connections or task states.
+			err = errors.Join(err, fmt.Errorf("duckdb: %d connections and %d task states still registered at close; database retained", len(d.conns), len(d.taskStates)))
 		} else {
 			d.lib.api.Close(&d.handle)
 			cache = d.cache

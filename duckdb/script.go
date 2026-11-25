@@ -109,7 +109,7 @@ func (a *scriptArgs) bindStmtLocked(s *Stmt, isLast bool) error {
 	}
 	subset := make([]NamedArg, 0, int(need))
 	seen := make(map[string]struct{}, int(need))
-	for i := uint64(0); i < need; i++ {
+	for i := range need {
 		ptr := api.ParameterName(s.handle, i+1)
 		name := abi.GoString(ptr)
 		if ptr != 0 {
@@ -261,7 +261,7 @@ func (c *Conn) execScriptWithArgs(ctx context.Context, tx *Tx, sql string, args 
 	}
 
 	var totalAffected uint64
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		if cerr := scope.err(); cerr != nil {
 			return ExecResult{}, cerr
 		}
@@ -353,7 +353,7 @@ func (c *Conn) queryScriptWithArgs(ctx context.Context, tx *Tx, sql string, args
 	}
 
 	var preAffected uint64
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		if cerr := scope.err(); cerr != nil {
 			api.DestroyExtracted(&extracted)
 			c.endScopeLocked(scope)
@@ -458,7 +458,7 @@ func (r *Rows) advanceScriptResultLocked() bool {
 			}
 			columns := make([]Column, int(n))
 			plans := make([]columnPlan, int(n))
-			for j := uint64(0); j < n; j++ {
+			for j := range n {
 				name := abi.GoString(api.ColumnName(&result, j))
 				lt := api.ColumnLogicalType(&result, j)
 				plan, planErr := buildColumnPlan(api, lt, 0, r.limits)
@@ -492,6 +492,11 @@ func (r *Rows) advanceScriptResultLocked() bool {
 				r.stmtType = StatementType(api.PreparedStatementType(s.handle))
 			} else {
 				r.stmtType = StatementTypeInvalid
+			}
+			if api.ResultReturnType != nil {
+				r.returnType = ResultType(api.ResultReturnType(result))
+			} else {
+				r.returnType = ResultTypeInvalid
 			}
 			r.chunk = 0
 			r.chunkSize = 0

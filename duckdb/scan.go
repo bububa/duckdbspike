@@ -257,6 +257,8 @@ func (g *Geometry) Scan(src any) error {
 	return scanExact(g, src, "duckdb.Geometry")
 }
 
+func (g Geometry) Value() (driver.Value, error) { return g, nil }
+
 func (u *UnionValue) Scan(src any) error {
 	if v, ok := src.(Value); ok {
 		x, err := v.Union()

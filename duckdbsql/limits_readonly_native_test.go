@@ -105,10 +105,8 @@ func TestNativeDatabaseSQLLimitsAndReadOnlyConnector(t *testing.T) {
 	// Concurrent pooled queries against the sealed read-only view.
 	var wg sync.WaitGroup
 	errs := make(chan error, 4)
-	for g := 0; g < 4; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			var cnt, sum int64
 			if qerr := roDB.QueryRowContext(ctx, "SELECT count(*), sum(total) FROM orders").Scan(&cnt, &sum); qerr != nil {
 				errs <- qerr
@@ -117,7 +115,7 @@ func TestNativeDatabaseSQLLimitsAndReadOnlyConnector(t *testing.T) {
 			if cnt != 50 || sum != 12750 {
 				errs <- errors.New("unexpected aggregate result")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	close(errs)

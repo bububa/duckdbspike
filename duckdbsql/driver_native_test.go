@@ -189,7 +189,7 @@ func TestNativeDatabaseSQLConnectorPoolTxAndRawConn(t *testing.T) {
 	// Concurrent pooled queries across goroutines.
 	var wg sync.WaitGroup
 	errCh := make(chan error, 8)
-	for g := 0; g < 8; g++ {
+	for g := range 8 {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()

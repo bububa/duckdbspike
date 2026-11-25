@@ -101,6 +101,8 @@ func toDuckDBValueDepth(v any, depth int) (duckdb.Value, error) {
 		return duckdb.BitValue(x)
 	case duckdb.Bignum:
 		return duckdb.BignumValue(x), nil
+	case duckdb.Geometry:
+		return duckdb.GeometryValue(x), nil
 	case duckdb.ListValue:
 		return duckdb.NewListValue(x.ElemType, x.Elements)
 	case duckdb.ArrayValue:
@@ -118,16 +120,32 @@ func toDuckDBValueDepth(v any, depth int) (duckdb.Value, error) {
 		return timeToDuckDBValue(x)
 	}
 
-	// Unwrap nil pointers before checking driver.Valuer so nil *T maps to SQL NULL.
+	// Unwrap nil pointers before checking sql.Null[T] / driver.Valuer so nil *T maps to SQL NULL.
 	rv := reflect.ValueOf(v)
-	if rv.Kind() == reflect.Ptr {
+	if rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return duckdb.NullValue(), nil
+		}
+		if inner, valid, ok := unwrapSQLNullGeneric(rv.Elem()); ok {
+			if !valid {
+				return duckdb.NullValue(), nil
+			}
+			return toDuckDBValueDepth(inner, depth+1)
 		}
 		if valuer, ok := v.(driver.Valuer); ok {
 			return valuerToDuckDBValue(valuer, v, depth)
 		}
 		return toDuckDBValueDepth(rv.Elem().Interface(), depth+1)
+	}
+
+	// Handle Go 1.22+ generic sql.Null[T] before driver.Valuer because
+	// sql.Null[T].Value delegates to driver.DefaultParameterConverter, which
+	// rejects non-primitive duckdb.* types such as Decimal, UUID, Hugeint, etc.
+	if inner, valid, ok := unwrapSQLNullGeneric(rv); ok {
+		if !valid {
+			return duckdb.NullValue(), nil
+		}
+		return toDuckDBValueDepth(inner, depth+1)
 	}
 
 	if valuer, ok := v.(driver.Valuer); ok {
@@ -177,13 +195,13 @@ func sliceToDuckDBList(rv reflect.Value, depth int) (duckdb.Value, error) {
 	elemGoType := rv.Type().Elem()
 	elems := make([]duckdb.Value, n)
 	var inferred duckdb.LogicalType
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ev := rv.Index(i)
 		dv, err := toDuckDBValueDepth(ev.Interface(), depth+1)
 		if err != nil {
 			// Support slices of Go structs (e.g. []Address).
 			et := elemGoType
-			for et.Kind() == reflect.Ptr {
+			for et.Kind() == reflect.Pointer {
 				et = et.Elem()
 			}
 			if et.Kind() == reflect.Struct && !isDirectScalarStructType(et) {
@@ -218,7 +236,7 @@ func convertElementOrStruct(ev reflect.Value, elemGoType reflect.Type, depth int
 		return dv, nil
 	}
 	et := elemGoType
-	for et.Kind() == reflect.Ptr {
+	for et.Kind() == reflect.Pointer {
 		et = et.Elem()
 	}
 	if et.Kind() == reflect.Struct && !isDirectScalarStructType(et) {
@@ -239,7 +257,7 @@ func arrayToDuckDBArray(rv reflect.Value, depth int) (duckdb.Value, error) {
 	elemGoType := rv.Type().Elem()
 	elems := make([]duckdb.Value, n)
 	var inferred duckdb.LogicalType
-	for i := 0; i < n; i++ {
+	for i := range n {
 		dv, err := convertElementOrStruct(rv.Index(i), elemGoType, depth)
 		if err != nil {
 			return duckdb.Value{}, fmt.Errorf("array[%d]: %w", i, err)
@@ -364,6 +382,28 @@ func mapToDuckDBMap(rv reflect.Value, depth int) (duckdb.Value, error) {
 	return duckdb.NewMapValue(keyType, valType, entries)
 }
 
+func sqlNullInnerType(t reflect.Type) (reflect.Type, bool) {
+	if t.Kind() != reflect.Struct || t.PkgPath() != "database/sql" || !strings.HasPrefix(t.Name(), "Null[") {
+		return nil, false
+	}
+	vf, okV := t.FieldByName("V")
+	validF, okValid := t.FieldByName("Valid")
+	if !okV || !okValid || validF.Type.Kind() != reflect.Bool {
+		return nil, false
+	}
+	return vf.Type, true
+}
+
+func unwrapSQLNullGeneric(rv reflect.Value) (any, bool, bool) {
+	if _, ok := sqlNullInnerType(rv.Type()); !ok {
+		return nil, false, false
+	}
+	if !rv.FieldByName("Valid").Bool() {
+		return nil, false, true
+	}
+	return rv.FieldByName("V").Interface(), true, true
+}
+
 func isDirectScalarStructType(t reflect.Type) bool {
 	switch t {
 	case reflect.TypeFor[time.Time](),
@@ -398,7 +438,8 @@ func isDirectScalarStructType(t reflect.Type) bool {
 		reflect.TypeFor[sql.NullTime]():
 		return true
 	default:
-		return false
+		_, ok := sqlNullInnerType(t)
+		return ok
 	}
 }
 
@@ -406,8 +447,11 @@ func inferLogicalTypeFromGoType(t reflect.Type, depth int) (duckdb.LogicalType, 
 	if depth > 64 {
 		return duckdb.LogicalType{}, fmt.Errorf("%w: type nesting exceeds limit", duckdb.ErrLimitExceeded)
 	}
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
+	}
+	if innerT, ok := sqlNullInnerType(t); ok {
+		return inferLogicalTypeFromGoType(innerT, depth+1)
 	}
 	switch t {
 	case reflect.TypeFor[[]byte]():
@@ -434,6 +478,8 @@ func inferLogicalTypeFromGoType(t reflect.Type, depth int) (duckdb.LogicalType, 
 		return duckdb.ScalarType(duckdb.TypeInterval), nil
 	case reflect.TypeFor[duckdb.Bit]():
 		return duckdb.ScalarType(duckdb.TypeBit), nil
+	case reflect.TypeFor[duckdb.Geometry]():
+		return duckdb.GeometryType(""), nil
 	case reflect.TypeFor[sql.NullBool]():
 		return duckdb.ScalarType(duckdb.TypeBoolean), nil
 	case reflect.TypeFor[sql.NullByte]():
@@ -504,8 +550,8 @@ func inferLogicalTypeFromGoType(t reflect.Type, depth int) (duckdb.LogicalType, 
 			return duckdb.LogicalType{}, fmt.Errorf("%w: ambiguous logical type for %s", duckdb.ErrInvalidInput, t)
 		}
 		fields := make([]duckdb.StructFieldType, 0, t.NumField())
-		for i := 0; i < t.NumField(); i++ {
-			sf := t.Field(i)
+		for sf := range t.Fields() {
+			sf := sf
 			if !sf.IsExported() {
 				continue
 			}

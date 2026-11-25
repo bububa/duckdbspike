@@ -10,6 +10,33 @@ import (
 	"github.com/bububa/duckdbspike/internal/abi"
 )
 
+// ResultType classifies what kind of result a DuckDB statement produced
+// (matching duckdb_result_type).
+type ResultType int32
+
+const (
+	ResultTypeInvalid     ResultType = ResultType(abi.ResultTypeInvalid)
+	ResultTypeChangedRows ResultType = ResultType(abi.ResultTypeChangedRows)
+	ResultTypeNothing     ResultType = ResultType(abi.ResultTypeNothing)
+	ResultTypeQueryResult ResultType = ResultType(abi.ResultTypeQueryResult)
+)
+
+// String returns a human-readable name for the result type.
+func (t ResultType) String() string {
+	switch t {
+	case ResultTypeInvalid:
+		return "INVALID"
+	case ResultTypeChangedRows:
+		return "CHANGED_ROWS"
+	case ResultTypeNothing:
+		return "NOTHING"
+	case ResultTypeQueryResult:
+		return "QUERY_RESULT"
+	default:
+		return fmt.Sprintf("RESULT_TYPE(%d)", int32(t))
+	}
+}
+
 // StatementType classifies a prepared SQL statement as reported by DuckDB.
 type StatementType int32
 
@@ -152,7 +179,7 @@ func (s *Stmt) ParamTypes() ([]LogicalType, error) {
 		return nil, fmt.Errorf("%w: parameter count %d overflows int", ErrInvalidInput, n)
 	}
 	types := make([]LogicalType, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		lt := api.ParamLogicalType(s.handle, i+1)
 		if lt == 0 {
 			types[i] = LogicalType{Kind: TypeInvalid}
@@ -262,7 +289,7 @@ func (c *Conn) describeTableWithTx(ctx context.Context, tx *Tx, catalog, schema,
 		return nil, fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, count)
 	}
 	cols := make([]TableColumn, int(count))
-	for i := uint64(0); i < count; i++ {
+	for i := range count {
 		namePtr := api.TableDescriptionGetColumnName(td, i)
 		name := abi.GoString(namePtr)
 		if namePtr != 0 {
@@ -303,7 +330,7 @@ func (l *Library) ConfigFlags() ([]ConfigFlag, error) {
 	api := l.api
 	n := api.ConfigCount()
 	flags := make([]ConfigFlag, 0, n)
-	for i := uintptr(0); i < n; i++ {
+	for i := range n {
 		var namePtr, descPtr uintptr
 		if api.GetConfigFlag(i, &namePtr, &descPtr) != abi.StateSuccess {
 			break
@@ -469,7 +496,7 @@ func (c *Conn) tableNamesWithTx(ctx context.Context, tx *Tx, sql string, qualifi
 		return nil, fmt.Errorf("%w: table name count %d exceeds %d", ErrLimitExceeded, n, c.limits.MaxCollectionLen)
 	}
 	names := make([]string, 0, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		elem := api.GetListChild(listVal, i)
 		if elem == 0 {
 			continue

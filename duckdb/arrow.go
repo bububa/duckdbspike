@@ -60,7 +60,7 @@ func (v ArrowSchemaView) MetadataBytes() []byte {
 		return nil
 	}
 	off := uintptr(4)
-	for i := int32(0); i < count; i++ {
+	for range count {
 		if off+4 > maxMetadataBytes {
 			return nil
 		}
@@ -430,10 +430,14 @@ type ArrowRows struct {
 	arrowOpts    uintptr
 	columns      []Column
 	resultLimits ResultLimits
+	stmtType     StatementType
+	returnType   ResultType
+	rowsAffected uint64
 	rowsRead     uint64
 	err          error
 	done         bool
 	closed       bool
+	script       *scriptCursor
 }
 
 // QueryArrow prepares sql, binds args, and starts a streaming Arrow cursor.
@@ -526,7 +530,7 @@ func (s *Stmt) ArrowSchema() (*ArrowSchema, error) {
 	defer pinner.Unpin()
 	cnames := make([][]byte, int(n))
 	namePtrs := make([]uintptr, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		namePtr := api.PreparedStatementColumnName(s.handle, i)
 		name := abi.GoString(namePtr)
 		if namePtr != 0 {
@@ -572,16 +576,19 @@ func (s *Stmt) ArrowSchema() (*ArrowSchema, error) {
 	return &ArrowSchema{raw: out}, nil
 }
 
-// QueryScriptArrow executes leading statements in sql sequentially and streams
-// the final statement as an Apache Arrow C Data Interface cursor. Positional
-// args are distributed across statements in declaration order.
+// QueryScriptArrow executes leading non-row statements sequentially and streams
+// row-returning statements as an Apache Arrow C Data Interface cursor. Additional
+// row-returning statements in sql can be consumed via ArrowRows.HasNextResultSet
+// and ArrowRows.NextResultSet. Positional args are distributed across statements
+// in declaration order.
 func (c *Conn) QueryScriptArrow(ctx context.Context, sql string, args ...Value) (*ArrowRows, error) {
 	return c.queryScriptArrowWithArgs(ctx, nil, sql, newScriptArgsPos(args))
 }
 
-// QueryScriptArrowNamed executes leading statements in sql sequentially and
-// streams the final statement as an Apache Arrow C Data Interface cursor,
-// routing named parameters ($name) across statements.
+// QueryScriptArrowNamed executes leading non-row statements sequentially and
+// streams row-returning statements as an Apache Arrow C Data Interface cursor,
+// routing named parameters ($name) across statements. Additional result sets
+// can be consumed via ArrowRows.HasNextResultSet and ArrowRows.NextResultSet.
 func (c *Conn) QueryScriptArrowNamed(ctx context.Context, sql string, args ...NamedArg) (*ArrowRows, error) {
 	sa, err := newScriptArgsNamed(args)
 	if err != nil {
@@ -637,7 +644,8 @@ func (c *Conn) queryScriptArrowWithArgs(ctx context.Context, tx *Tx, sql string,
 		return nil, fmt.Errorf("%w: script contains no statements", ErrInvalidInput)
 	}
 
-	for i := uint64(0); i < count-1; i++ {
+	var preAffected uint64
+	for i := uint64(0); i < count; i++ {
 		if cerr := scope.err(); cerr != nil {
 			api.DestroyExtracted(&extracted)
 			c.endScopeLocked(scope)
@@ -649,29 +657,42 @@ func (c *Conn) queryScriptArrowWithArgs(ctx context.Context, tx *Tx, sql string,
 			c.endScopeLocked(scope)
 			return nil, err
 		}
-		_, execErr := s.execNoFinishLocked(func() error { return args.bindStmtLocked(s, false) }, scope)
+		isLast := i == count-1
+		if isLast || isRowReturningStmtLocked(api, s.handle) {
+			ar, err := s.startArrowLocked(func() error { return args.bindStmtLocked(s, isLast) }, scope)
+			if err != nil {
+				s.releaseLocked()
+				api.DestroyExtracted(&extracted)
+				c.endScopeLocked(scope)
+				return nil, err
+			}
+			ar.ownsStmt = true
+			ar.rowsAffected += preAffected
+			if isLast {
+				api.DestroyExtracted(&extracted)
+			} else {
+				ar.script = &scriptCursor{
+					extracted: extracted,
+					nextIdx:   i + 1,
+					total:     count,
+					args:      args,
+				}
+			}
+			return ar, nil
+		}
+		res, execErr := s.execNoFinishLocked(func() error { return args.bindStmtLocked(s, false) }, scope)
 		s.releaseLocked()
 		if execErr != nil {
 			api.DestroyExtracted(&extracted)
 			c.endScopeLocked(scope)
 			return nil, execErr
 		}
+		preAffected += res.RowsAffected
 	}
 
-	lastStmt, err := c.prepareExtractedLocked(extracted, count-1, scope)
 	api.DestroyExtracted(&extracted)
-	if err != nil {
-		c.endScopeLocked(scope)
-		return nil, err
-	}
-	ar, err := lastStmt.startArrowLocked(func() error { return args.bindStmtLocked(lastStmt, true) }, scope)
-	if err != nil {
-		lastStmt.releaseLocked()
-		c.endScopeLocked(scope)
-		return nil, err
-	}
-	ar.ownsStmt = true
-	return ar, nil
+	c.endScopeLocked(scope)
+	return nil, fmt.Errorf("%w: script contains no statements", ErrInvalidInput)
 }
 
 func (s *Stmt) queryArrowWithBinder(ctx context.Context, bind func() error) (*ArrowRows, error) {
@@ -726,7 +747,7 @@ func (s *Stmt) startArrowLocked(bind func() error, scope *cancelScope) (*ArrowRo
 	}
 	limits := s.conn.limits
 	columns := make([]Column, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		name := abi.GoString(api.ColumnName(&result, i))
 		lt := api.ColumnLogicalType(&result, i)
 		plan, planErr := buildColumnPlan(api, lt, 0, limits)
@@ -753,6 +774,16 @@ func (s *Stmt) startArrowLocked(bind func() error, scope *cancelScope) (*ArrowRo
 		api.DestroyResult(&result)
 		return nil, cerr
 	}
+	var stmtType StatementType
+	if api.ResultStatementType != nil {
+		stmtType = StatementType(api.ResultStatementType(result))
+	} else if api.PreparedStatementType != nil {
+		stmtType = StatementType(api.PreparedStatementType(s.handle))
+	}
+	var returnType ResultType
+	if api.ResultReturnType != nil {
+		returnType = ResultType(api.ResultReturnType(result))
+	}
 	ar := &ArrowRows{
 		conn:         s.conn,
 		stmt:         s,
@@ -761,6 +792,9 @@ func (s *Stmt) startArrowLocked(bind func() error, scope *cancelScope) (*ArrowRo
 		arrowOpts:    arrowOpts,
 		columns:      columns,
 		resultLimits: s.conn.resultLimits,
+		stmtType:     stmtType,
+		returnType:   returnType,
+		rowsAffected: api.RowsChanged(&result),
 	}
 	s.arrowRows = ar
 	s.conn.activeArrow = ar
@@ -773,6 +807,32 @@ func (r *ArrowRows) Columns() []Column {
 		return nil
 	}
 	return append([]Column(nil), r.columns...)
+}
+
+// RowsAffected returns the row change count copied before the result closes.
+func (r *ArrowRows) RowsAffected() uint64 {
+	if r == nil {
+		return 0
+	}
+	return r.rowsAffected
+}
+
+// StatementType returns the SQL statement category (SELECT, EXPLAIN, PRAGMA,
+// etc.) for the current result set, remaining readable after Close.
+func (r *ArrowRows) StatementType() StatementType {
+	if r == nil {
+		return StatementTypeInvalid
+	}
+	return r.stmtType
+}
+
+// ReturnType returns the DuckDB result category (QUERY_RESULT, CHANGED_ROWS,
+// NOTHING, or INVALID) for the current result set, remaining readable after Close.
+func (r *ArrowRows) ReturnType() ResultType {
+	if r == nil {
+		return ResultTypeInvalid
+	}
+	return r.returnType
 }
 
 // Schema exports an owned Apache Arrow C Data Interface ArrowSchema describing
@@ -806,7 +866,7 @@ func (r *ArrowRows) Schema() (*ArrowSchema, error) {
 	defer pinner.Unpin()
 	cnames := make([][]byte, n)
 	namePtrs := make([]uintptr, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		types[i] = api.ColumnLogicalType(&r.result, uint64(i))
 		cb, err := abi.CString(r.columns[i].Name)
 		if err != nil {
@@ -877,9 +937,11 @@ func (r *ArrowRows) Next() (*ArrowArray, error) {
 				r.err = nativeError("fetch", errType, message)
 				return nil, r.err
 			}
-			if !r.scope.tryFinish() {
-				r.err = r.scope.err()
-				return nil, r.err
+			if !r.hasRemainingScriptLocked() {
+				if !r.scope.tryFinish() {
+					r.err = r.scope.err()
+					return nil, r.err
+				}
 			}
 			r.done = true
 			return nil, nil
@@ -910,6 +972,209 @@ func (r *ArrowRows) Next() (*ArrowArray, error) {
 		r.rowsRead += size
 		return &ArrowArray{raw: out}, nil
 	}
+}
+
+// HasNextResultSet reports whether the underlying QueryScriptArrow cursor has
+// remaining statements that may produce another Arrow result set.
+func (r *ArrowRows) HasNextResultSet() bool {
+	if r == nil {
+		return false
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed || r.err != nil {
+		return false
+	}
+	return r.hasRemainingScriptLocked()
+}
+
+// NextResultSet advances a multi-statement QueryScriptArrow cursor to the next
+// row-returning statement, releasing the current Arrow result and options while
+// executing any intervening non-row statements. After NextResultSet returns
+// true, callers may inspect Columns/Schema/StatementType/ReturnType and iterate
+// chunks with Next.
+func (r *ArrowRows) NextResultSet() bool {
+	if r == nil {
+		return false
+	}
+	c := r.conn
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r.closed {
+		if r.err == nil && !r.done {
+			r.err = ErrClosed
+		}
+		return false
+	}
+	if r.err != nil {
+		return false
+	}
+	if cerr := r.scope.err(); cerr != nil {
+		r.err = cerr
+		return false
+	}
+	if !r.hasRemainingScriptLocked() {
+		r.done = true
+		return false
+	}
+	return r.advanceScriptResultLocked()
+}
+
+func (r *ArrowRows) hasRemainingScriptLocked() bool {
+	return r.script != nil && r.script.extracted != 0 && r.script.nextIdx < r.script.total
+}
+
+func (r *ArrowRows) destroyCurrentResultLocked() {
+	api := r.conn.api
+	if r.arrowOpts != 0 {
+		api.DestroyArrowOptions(&r.arrowOpts)
+	}
+	api.DestroyResult(&r.result)
+	r.result = abi.Result{}
+	if r.stmt != nil {
+		s := r.stmt
+		r.stmt = nil
+		s.arrowRows = nil
+		if r.ownsStmt {
+			s.releaseLocked()
+		}
+	}
+}
+
+func (r *ArrowRows) advanceScriptResultLocked() bool {
+	c := r.conn
+	api := c.api
+	sc := r.script
+
+	r.destroyCurrentResultLocked()
+
+	for sc.nextIdx < sc.total {
+		if cerr := r.scope.err(); cerr != nil {
+			sc.destroyLocked(api)
+			r.err = cerr
+			return false
+		}
+		idx := sc.nextIdx
+		isLast := idx == sc.total-1
+		s, err := c.prepareExtractedLocked(sc.extracted, idx, r.scope)
+		if err != nil {
+			sc.destroyLocked(api)
+			r.err = err
+			return false
+		}
+		if isRowReturningStmtLocked(api, s.handle) {
+			result, err := s.runPendingLocked(func() error { return sc.args.bindStmtLocked(s, isLast) }, r.scope)
+			if err != nil {
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = err
+				return false
+			}
+			if cerr := r.scope.err(); cerr != nil {
+				api.DestroyResult(&result)
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = cerr
+				return false
+			}
+			if !api.ResultIsStreaming(result) {
+				api.DestroyResult(&result)
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = ErrNotStreaming
+				return false
+			}
+			n := api.ColumnCount(&result)
+			if n > math.MaxInt {
+				api.DestroyResult(&result)
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, n)
+				return false
+			}
+			columns := make([]Column, int(n))
+			for j := uint64(0); j < n; j++ {
+				name := abi.GoString(api.ColumnName(&result, j))
+				lt := api.ColumnLogicalType(&result, j)
+				plan, planErr := buildColumnPlan(api, lt, 0, c.limits)
+				api.DestroyLogicalType(&lt)
+				if planErr != nil {
+					api.DestroyResult(&result)
+					s.releaseLocked()
+					sc.destroyLocked(api)
+					r.err = fmt.Errorf("column %d (%q): %w", j, name, planErr)
+					return false
+				}
+				columns[j] = Column{Name: name, Type: plan.lt}
+			}
+			var arrowOpts uintptr
+			if api.ResultGetArrowOptions != nil {
+				arrowOpts = api.ResultGetArrowOptions(&result)
+			}
+			if arrowOpts == 0 {
+				api.ConnectionGetArrowOptions(c.handle, &arrowOpts)
+			}
+			if arrowOpts == 0 {
+				api.DestroyResult(&result)
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = nativeError("result_get_arrow_options", abi.ErrorInvalid, "")
+				return false
+			}
+			if cerr := r.scope.err(); cerr != nil {
+				api.DestroyArrowOptions(&arrowOpts)
+				api.DestroyResult(&result)
+				s.releaseLocked()
+				sc.destroyLocked(api)
+				r.err = cerr
+				return false
+			}
+			r.stmt = s
+			s.arrowRows = r
+			r.ownsStmt = true
+			r.result = result
+			r.arrowOpts = arrowOpts
+			r.columns = columns
+			if api.ResultStatementType != nil {
+				r.stmtType = StatementType(api.ResultStatementType(result))
+			} else if api.PreparedStatementType != nil {
+				r.stmtType = StatementType(api.PreparedStatementType(s.handle))
+			} else {
+				r.stmtType = StatementTypeInvalid
+			}
+			if api.ResultReturnType != nil {
+				r.returnType = ResultType(api.ResultReturnType(result))
+			} else {
+				r.returnType = ResultTypeInvalid
+			}
+			r.rowsAffected += api.RowsChanged(&result)
+			r.done = false
+			sc.nextIdx = idx + 1
+			if sc.nextIdx >= sc.total {
+				sc.destroyLocked(api)
+			}
+			return true
+		}
+
+		res, execErr := s.execNoFinishLocked(func() error { return sc.args.bindStmtLocked(s, isLast) }, r.scope)
+		s.releaseLocked()
+		if execErr != nil {
+			sc.destroyLocked(api)
+			r.err = execErr
+			return false
+		}
+		r.rowsAffected += res.RowsAffected
+		sc.nextIdx = idx + 1
+	}
+
+	sc.destroyLocked(api)
+	if !r.scope.tryFinish() {
+		r.err = r.scope.err()
+		return false
+	}
+	r.done = true
+	return false
 }
 
 // Err returns the error that ended iteration, if any.
@@ -947,16 +1212,12 @@ func (r *ArrowRows) releaseLocked() {
 	r.closed = true
 	r.conn.endScopeLocked(r.scope)
 	api := r.conn.api
-	if r.arrowOpts != 0 {
-		api.DestroyArrowOptions(&r.arrowOpts)
+	if r.script != nil {
+		r.script.destroyLocked(api)
+		r.script = nil
 	}
-	api.DestroyResult(&r.result)
+	r.destroyCurrentResultLocked()
 	if r.conn.activeArrow == r {
 		r.conn.activeArrow = nil
-	}
-	s := r.stmt
-	s.arrowRows = nil
-	if r.ownsStmt {
-		s.releaseLocked()
 	}
 }

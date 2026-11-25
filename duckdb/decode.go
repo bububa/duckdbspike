@@ -186,7 +186,7 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		}
 		values := make([]string, int(dictSize))
 		lookup := make(map[string]uint32, int(dictSize))
-		for i := uint64(0); i < dictSize; i++ {
+		for i := range dictSize {
 			ptr := api.EnumDictionaryValue(lt, i)
 			label := abi.GoString(ptr)
 			if ptr != 0 {
@@ -257,7 +257,7 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		}
 		fields := make([]StructFieldType, 0, count)
 		fieldPlans := make([]columnFieldPlan, 0, count)
-		for i := uint64(0); i < count; i++ {
+		for i := range count {
 			namePtr := api.StructTypeChildName(lt, i)
 			name := abi.GoString(namePtr)
 			if namePtr != 0 {
@@ -283,7 +283,7 @@ func buildColumnPlan(api *abi.API, lt uintptr, depth int, limits DecodeLimits) (
 		}
 		fields := make([]StructFieldType, 0, count)
 		fieldPlans := make([]columnFieldPlan, 0, count)
-		for i := uint64(0); i < count; i++ {
+		for i := range count {
 			namePtr := api.UnionTypeMemberName(lt, i)
 			name := abi.GoString(namePtr)
 			if namePtr != 0 {
@@ -458,7 +458,7 @@ func decodeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, 
 		}
 		childVec := api.ArrayVectorGetChild(vec)
 		elems := make([]Value, int(size))
-		for j := uint64(0); j < size; j++ {
+		for j := range size {
 			v, err := decodeVectorValue(api, plan.elem, childVec, base+j, limits)
 			if err != nil {
 				return Value{}, err

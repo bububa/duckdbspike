@@ -53,15 +53,13 @@ func TestNativeDBInitMultiStmtAndErgonomicBinders(t *testing.T) {
 	db.SetMaxIdleConns(4)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 4 {
+		wg.Go(func() {
 			var one int
 			if qerr := db.QueryRowContext(ctx, "SELECT 1").Scan(&one); qerr != nil {
 				t.Errorf("concurrent ping: %v", qerr)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := dbInitCalls.Load(); got != 1 {

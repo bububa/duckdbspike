@@ -49,12 +49,12 @@ func encodeArrowMetadata(md arrow.Metadata) []byte {
 		return nil
 	}
 	size := 4
-	for i := 0; i < n; i++ {
+	for i := range n {
 		size += 4 + len(md.Keys()[i]) + 4 + len(md.Values()[i])
 	}
 	out := make([]byte, 0, size)
 	out = binary.NativeEndian.AppendUint32(out, uint32(int32(n)))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		k := md.Keys()[i]
 		v := md.Values()[i]
 		out = binary.NativeEndian.AppendUint32(out, uint32(int32(len(k))))
@@ -72,9 +72,10 @@ func mergeExtensionMetadata(base arrow.Metadata, ext arrow.ExtensionType) arrow.
 	hasMeta := false
 	for i := 0; i < base.Len(); i++ {
 		k := base.Keys()[i]
-		if k == arrowExtensionNameKey {
+		switch k {
+		case arrowExtensionNameKey:
 			hasName = true
-		} else if k == arrowExtensionMetadataKey {
+		case arrowExtensionMetadataKey:
 			hasMeta = true
 		}
 		keys = append(keys, k)
@@ -351,7 +352,7 @@ func ExportRecordBatch(rec arrow.RecordBatch) (*duckdb.ArrowArray, error) {
 	}
 	numCols := int(rec.NumCols())
 	children := make([]duckdb.ArrowArraySpec, numCols)
-	for i := 0; i < numCols; i++ {
+	for i := range numCols {
 		col := rec.Column(i)
 		if col == nil {
 			return nil, fmt.Errorf("%w: column %d is nil", duckdb.ErrInvalidInput, i)

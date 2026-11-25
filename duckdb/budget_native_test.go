@@ -69,9 +69,7 @@ func TestNativeSpillResourceBudgetAndExhaustion(t *testing.T) {
 	var peakSpill int64
 	stopPoll := make(chan struct{})
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			if b, _ := dirBytesAndFiles(spillDir); b > peakSpill {
 				peakSpill = b
@@ -82,7 +80,7 @@ func TestNativeSpillResourceBudgetAndExhaustion(t *testing.T) {
 			case <-time.After(10 * time.Millisecond):
 			}
 		}
-	}()
+	})
 
 	rows, err := conn.Query(ctx, "SELECT i, repeat('x', 240) FROM range(1500000) t(i) ORDER BY hash(i)")
 	if err != nil {
@@ -232,7 +230,7 @@ func TestNativeRepeatedQueryResourcePlateau(t *testing.T) {
 	defer bc.Close()
 
 	fdsBefore := openFDCount()
-	for iter := 0; iter < 40; iter++ {
+	for iter := range 40 {
 		db, err := bc.Open(ctx, lib, ":memory:", duckdb.InstanceConfig{
 			NativeMemoryBytes: 64 << 20,
 			Threads:           2,

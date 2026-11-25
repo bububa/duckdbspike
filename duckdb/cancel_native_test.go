@@ -142,7 +142,7 @@ func TestNativeConcurrentCloseInterruptsAndJoins(t *testing.T) {
 	if err := db2.Close(); err != nil {
 		t.Fatalf("db2.Close: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if e := <-errs; !errors.Is(e, duckdb.ErrClosed) {
 			t.Fatalf("query[%d] after db2.Close = %v, want ErrClosed", i, e)
 		}

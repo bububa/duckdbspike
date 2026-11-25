@@ -57,7 +57,7 @@ func (s *Stmt) ParamNames() ([]string, error) {
 		return nil, fmt.Errorf("%w: parameter count %d overflows int", ErrInvalidInput, n)
 	}
 	names := make([]string, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		ptr := api.ParameterName(s.handle, i+1)
 		names[i] = abi.GoString(ptr)
 		if ptr != 0 {
@@ -87,7 +87,7 @@ func (s *Stmt) Columns() ([]Column, error) {
 		return nil, fmt.Errorf("%w: column count %d overflows int", ErrInvalidInput, n)
 	}
 	cols := make([]Column, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		namePtr := api.PreparedStatementColumnName(s.handle, i)
 		name := abi.GoString(namePtr)
 		if namePtr != 0 {
@@ -300,7 +300,7 @@ func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error)
 	limits := s.conn.limits
 	columns := make([]Column, int(n))
 	plans := make([]columnPlan, int(n))
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		name := abi.GoString(api.ColumnName(&result, i))
 		lt := api.ColumnLogicalType(&result, i)
 		plan, planErr := buildColumnPlan(api, lt, 0, limits)
@@ -322,6 +322,10 @@ func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error)
 	} else if api.PreparedStatementType != nil {
 		stmtType = StatementType(api.PreparedStatementType(s.handle))
 	}
+	var returnType ResultType
+	if api.ResultReturnType != nil {
+		returnType = ResultType(api.ResultReturnType(result))
+	}
 	rows := &Rows{
 		conn:         s.conn,
 		stmt:         s,
@@ -332,6 +336,7 @@ func (s *Stmt) startLocked(bind func() error, scope *cancelScope) (*Rows, error)
 		limits:       limits,
 		resultLimits: s.conn.resultLimits,
 		stmtType:     stmtType,
+		returnType:   returnType,
 		rowsAffected: api.RowsChanged(&result),
 	}
 	s.rows = rows

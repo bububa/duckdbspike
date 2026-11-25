@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/big"
 	"runtime"
+	"slices"
 	"unicode/utf8"
 	"unsafe"
 
@@ -109,8 +110,8 @@ func (a *Appender) appendRowChunkLocked(vals []Value) error {
 	var undo []listSizeUndo
 
 	rollback := func() {
-		for i := len(undo) - 1; i >= 0; i-- {
-			_ = api.ListVectorSetSize(undo[i].vec, undo[i].prevSize)
+		for _, u := range slices.Backward(undo) {
+			_ = api.ListVectorSetSize(u.vec, u.prevSize)
 		}
 	}
 
@@ -173,6 +174,13 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 					setVectorNull(api, memberVec, row)
 				}
 			}
+		case TypeVariant:
+			for i := range uint64(4) {
+				childVec := api.StructVectorGetChild(vec, i)
+				if childVec != 0 {
+					setVectorNull(api, childVec, row)
+				}
+			}
 		}
 		return nil
 	}
@@ -183,6 +191,9 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 	case TypeSQLNull:
 		setVectorNull(api, vec, row)
 		return nil
+
+	case TypeVariant:
+		return writeVariantVectorValue(api, vec, row, v, depth, limits, undo)
 
 	case TypeStruct:
 		st, err := v.Struct()
@@ -262,7 +273,7 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 		}
 		base := row * size
 		childVec := api.ArrayVectorGetChild(vec)
-		for j := uint64(0); j < size; j++ {
+		for j := range size {
 			if err := writeVectorValue(api, plan.elem, childVec, base+j, av.Elements[j], depth+1, limits, undo); err != nil {
 				return fmt.Errorf("[%d]: %w", j, err)
 			}
@@ -296,7 +307,7 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 		writeAt[abi.ListEntry](data, row, abi.ListEntry{Offset: curSize, Length: n})
 		if n > 0 {
 			childVec := api.ListVectorGetChild(vec)
-			for j := uint64(0); j < n; j++ {
+			for j := range n {
 				if err := writeVectorValue(api, plan.elem, childVec, curSize+j, lv.Elements[j], depth+1, limits, undo); err != nil {
 					return fmt.Errorf("[%d]: %w", j, err)
 				}
@@ -333,7 +344,7 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 			structVec := api.ListVectorGetChild(vec)
 			keyVec := api.StructVectorGetChild(structVec, 0)
 			valVec := api.StructVectorGetChild(structVec, 1)
-			for j := uint64(0); j < n; j++ {
+			for j := range n {
 				if mv.Entries[j].Key.IsNull() {
 					return fmt.Errorf("%w: map key[%d] must not be NULL", ErrInvalidInput, j)
 				}
@@ -385,6 +396,20 @@ func writeVectorValue(api *abi.API, plan *columnPlan, vec uintptr, row uint64, v
 		}
 		wire := encodeBignumWire(bn)
 		assignVectorBytes(api, vec, row, wire)
+		return nil
+
+	case TypeGeometry:
+		g, err := v.Geometry()
+		if err != nil {
+			return err
+		}
+		if len(g.WKB) == 0 {
+			return fmt.Errorf("%w: GEOMETRY WKB payload must not be empty", ErrInvalidInput)
+		}
+		if plan.lt.GeometryCRS != "" && g.CRS != "" && g.CRS != plan.lt.GeometryCRS {
+			return fmt.Errorf("%w: GEOMETRY CRS %q does not match column CRS %q", ErrTypeMismatch, g.CRS, plan.lt.GeometryCRS)
+		}
+		assignVectorBytes(api, vec, row, g.WKB)
 		return nil
 	}
 

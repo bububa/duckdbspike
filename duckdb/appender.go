@@ -242,7 +242,7 @@ func (a *Appender) refreshColumnsLocked() error {
 			}
 		}
 	}()
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		lt := api.AppenderColumnType(a.handle, i)
 		nativeTypes[i] = lt
 		plan, err := buildColumnPlan(api, lt, 0, a.conn.limits)

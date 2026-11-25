@@ -119,8 +119,7 @@ func TestNativeLifecycleStreamingAndErrors(t *testing.T) {
 		err = rows.Err()
 		_ = rows.Close()
 	}
-	var derr *duckdb.Error
-	if !errors.As(err, &derr) {
+	if _, ok := errors.AsType[*duckdb.Error](err); !ok {
 		t.Fatalf("late fetch error = %v, want *duckdb.Error", err)
 	}
 
@@ -161,7 +160,7 @@ func TestNativeFileDatabaseAndGCPressure(t *testing.T) {
 		_ = db.Close()
 		t.Fatalf("Connect: %v", err)
 	}
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		rows, err := conn.Query(ctx, "SELECT i FROM range(4096) t(i)")
 		if err != nil {
 			t.Fatalf("iter %d Query: %v", i, err)

@@ -862,7 +862,7 @@ func TestConcurrentCloseRaceSafe(t *testing.T) {
 	rows, _ := conn.Query(ctx, "SELECT 1")
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(3)
 		go func() { defer wg.Done(); _ = rows.Close() }()
 		go func() { defer wg.Done(); _ = conn.Close() }()

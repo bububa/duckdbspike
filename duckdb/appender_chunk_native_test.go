@@ -243,7 +243,7 @@ func TestNativeChunkBufferedAppenderAllTypesBoundariesAndRollback(t *testing.T) 
 	}
 	const totalRows = 5000
 	batch := make([][]duckdb.Value, totalRows)
-	for i := 0; i < totalRows; i++ {
+	for i := range totalRows {
 		batch[i] = []duckdb.Value{
 			duckdb.Int64Value(int64(i + 1)),
 			duckdb.VarcharValue(fmt.Sprintf("row_%05d", i+1)),
@@ -267,6 +267,100 @@ func TestNativeChunkBufferedAppenderAllTypesBoundariesAndRollback(t *testing.T) 
 	}
 	if defCnt, _ := bRow[2].Int64(); defCnt != totalRows {
 		t.Fatalf("bulk default tag count = %d, want %d", defCnt, totalRows)
+	}
+}
+
+func TestNativeChunkAppenderGeometry(t *testing.T) {
+	lib := loadNativeLibrary(t)
+	ctx := context.Background()
+	db, err := lib.Open(ctx, ":memory:", duckdb.Option{Name: "threads", Value: "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conn, err := db.Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Obtain canonical WKB payloads directly from DuckDB's built-in GEOMETRY cast.
+	_, wkbRow := querySingleRow(t, conn, `SELECT 'POINT (1.5 2.5)'::GEOMETRY, 'LINESTRING (0 0, 3 4)'::GEOMETRY`)
+	pt, err := wkbRow[0].Geometry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	line, err := wkbRow[1].Geometry()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := conn.Exec(ctx, `CREATE TABLE geom_app (id INT, g GEOMETRY, g_crs GEOMETRY('OGC:CRS84'))`); err != nil {
+		t.Fatal(err)
+	}
+	app, err := conn.NewAppender(ctx, "", "", "geom_app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	// Empty WKB and CRS mismatch must be rejected cleanly without corrupting the chunk.
+	if err := app.AppendRow(duckdb.Int32Value(0), duckdb.GeometryValue(duckdb.Geometry{}), duckdb.NullValue()); !errors.Is(err, duckdb.ErrInvalidInput) {
+		t.Fatalf("empty WKB err = %v, want ErrInvalidInput", err)
+	}
+	if err := app.AppendRow(duckdb.Int32Value(0), duckdb.GeometryValue(pt), duckdb.GeometryValue(duckdb.Geometry{WKB: pt.WKB, CRS: "EPSG:4326"})); !errors.Is(err, duckdb.ErrTypeMismatch) {
+		t.Fatalf("CRS mismatch err = %v, want ErrTypeMismatch", err)
+	}
+
+	if err := app.AppendRows([][]duckdb.Value{
+		{duckdb.Int32Value(1), duckdb.GeometryValue(pt), duckdb.GeometryValue(duckdb.Geometry{WKB: pt.WKB, CRS: "OGC:CRS84"})},
+		{duckdb.Int32Value(2), duckdb.GeometryValue(line), duckdb.NullValue()},
+		{duckdb.Int32Value(3), duckdb.NullValue(), duckdb.GeometryValue(duckdb.Geometry{WKB: line.WKB})},
+	}); err != nil {
+		t.Fatalf("AppendRows geometry: %v", err)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatalf("app.Close: %v", err)
+	}
+
+	rows, err := conn.Query(ctx, `SELECT id, g, g::VARCHAR, g_crs, g_crs::VARCHAR FROM geom_app ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+
+	var got [][]duckdb.Value
+	for rows.Next() {
+		r, err := rows.DecodeRow(nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("row count = %d, want 3", len(got))
+	}
+	if s, _ := got[0][2].Varchar(); s != "POINT (1.5 2.5)" {
+		t.Fatalf("row 0 g::VARCHAR = %q, want POINT (1.5 2.5)", s)
+	}
+	gCRS0, err := got[0][3].Geometry()
+	if err != nil || gCRS0.CRS != "OGC:CRS84" {
+		t.Fatalf("row 0 g_crs = (%+v, %v), want CRS OGC:CRS84", gCRS0, err)
+	}
+	if s, _ := got[1][2].Varchar(); s != "LINESTRING (0 0, 3 4)" {
+		t.Fatalf("row 1 g::VARCHAR = %q, want LINESTRING (0 0, 3 4)", s)
+	}
+	if !got[1][3].IsNull() {
+		t.Fatalf("row 1 g_crs expected NULL, got %v", got[1][3])
+	}
+	if !got[2][1].IsNull() {
+		t.Fatalf("row 2 g expected NULL, got %v", got[2][1])
+	}
+	if s, _ := got[2][4].Varchar(); s != "LINESTRING (0 0, 3 4)" {
+		t.Fatalf("row 2 g_crs::VARCHAR = %q, want LINESTRING (0 0, 3 4)", s)
 	}
 }
 
@@ -294,7 +388,7 @@ func BenchmarkNativeAppenderRows(b *testing.B) {
 
 	const n = 50_000
 	rows := make([][]duckdb.Value, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		rows[i] = []duckdb.Value{
 			duckdb.Int64Value(int64(i)),
 			duckdb.Float64Value(float64(i) * 0.5),

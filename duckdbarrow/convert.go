@@ -42,7 +42,7 @@ func ImportSchema(s *duckdb.ArrowSchema) (*arrow.Schema, error) {
 	}
 	n := root.ChildCount()
 	fields := make([]arrow.Field, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		f, err := importField(root.Child(i), 0)
 		if err != nil {
 			return nil, fmt.Errorf("field %d: %w", i, err)
@@ -67,7 +67,7 @@ func decodeArrowMetadata(raw []byte) (arrow.Metadata, bool) {
 	off := 4
 	keys := make([]string, 0, count)
 	vals := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for range count {
 		if off+4 > len(raw) {
 			return arrow.Metadata{}, false
 		}
@@ -114,6 +114,20 @@ func importField(v duckdb.ArrowSchemaView, depth int) (arrow.Field, error) {
 	}
 	if md, ok := decodeArrowMetadata(v.MetadataBytes()); ok {
 		f.Metadata = md
+		if idx := md.FindKey(arrowExtensionNameKey); idx >= 0 {
+			extName := md.Values()[idx]
+			if reg := arrow.GetExtensionType(extName); reg != nil {
+				var extMeta string
+				if metaIdx := md.FindKey(arrowExtensionMetadataKey); metaIdx >= 0 {
+					extMeta = md.Values()[metaIdx]
+				}
+				extDT, err := reg.Deserialize(dt, extMeta)
+				if err != nil {
+					return arrow.Field{}, fmt.Errorf("%w: deserialize Arrow extension %q: %v", duckdb.ErrInvalidInput, extName, err)
+				}
+				f.Type = extDT
+			}
+		}
 	}
 	return f, nil
 }
@@ -256,7 +270,7 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 	case "+s":
 		n := v.ChildCount()
 		fields := make([]arrow.Field, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			f, err := importField(v.Child(i), depth+1)
 			if err != nil {
 				return nil, err
@@ -364,7 +378,7 @@ func parseArrowFormat(v duckdb.ArrowSchemaView, depth int) (arrow.DataType, erro
 		}
 		codes := make([]arrow.UnionTypeCode, n)
 		fields := make([]arrow.Field, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			c, err := strconv.ParseInt(codeParts[i], 10, 8)
 			if err != nil {
 				return nil, fmt.Errorf("%w: invalid union type code %q in %q", duckdb.ErrInvalidInput, codeParts[i], format)
@@ -464,6 +478,19 @@ func importArrayData(dt arrow.DataType, v duckdb.ArrowArrayView, alloc memory.Al
 	offset := int(v.Offset())
 	nulls := int(v.NullCount())
 	total := offset + length
+
+	// Extension-typed arrays delegate buffer import to their storage type and
+	// re-wrap the resulting Data under the ExtensionType.
+	if ext, ok := dt.(arrow.ExtensionType); ok {
+		storageData, err := importArrayData(ext.StorageType(), v, alloc, depth+1)
+		if err != nil {
+			return nil, err
+		}
+		data := array.NewData(ext, storageData.Len(), storageData.Buffers(), storageData.Children(), storageData.NullN(), storageData.Offset())
+		data.SetDictionary(storageData.Dictionary())
+		storageData.Release()
+		return data, nil
+	}
 
 	// Dictionary-encoded arrays (e.g. DuckDB ENUM).
 	if dictType, ok := dt.(*arrow.DictionaryType); ok {
@@ -572,7 +599,7 @@ func importArrayData(dt arrow.DataType, v duckdb.ArrowArrayView, alloc memory.Al
 				return nil, fmt.Errorf("%w: missing variadic buffer sizes for view array", duckdb.ErrInvalidInput)
 			}
 			sizes := unsafe.Slice((*int64)(sizesPtr), nDataBufs)
-			for i := 0; i < nDataBufs; i++ {
+			for i := range nDataBufs {
 				bufs[2+i] = copyBuffer(alloc, v.Buffer(2+i), int(sizes[i]))
 			}
 		}

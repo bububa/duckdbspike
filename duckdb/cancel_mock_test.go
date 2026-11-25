@@ -206,7 +206,7 @@ func TestCancelDuringFetchAndConcurrentCloseNoDeadlock(t *testing.T) {
 		if err := db.Close(); err != nil {
 			t.Fatalf("db.Close: %v", err)
 		}
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			if err := <-errs; !errors.Is(err, ErrClosed) {
 				t.Fatalf("conn[%d] err = %v, want ErrClosed", i, err)
 			}
@@ -232,7 +232,7 @@ func TestOldCancelerNeverPoisonsNextQueryAndLinearization(t *testing.T) {
 	}
 
 	origTask := api.PendingExecuteTask
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		// 1) Canceled query that spins until interrupted.
 		ctx, cancel := context.WithCancel(context.Background())
 		var gotInt atomic.Bool

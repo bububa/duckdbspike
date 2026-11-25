@@ -1041,7 +1041,7 @@ func (b Bit) String() string {
 	}
 	pad := int(b.Data[0])
 	out := make([]byte, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		bitPos := pad + i
 		byteIdx := 1 + bitPos/8
 		shift := uint(7 - (bitPos % 8))

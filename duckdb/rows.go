@@ -31,6 +31,7 @@ type Rows struct {
 	limits       DecodeLimits
 	resultLimits ResultLimits
 	stmtType     StatementType
+	returnType   ResultType
 	rowsAffected uint64
 	rowsRead     uint64
 	bytesRead    uint64
@@ -68,6 +69,15 @@ func (r *Rows) StatementType() StatementType {
 		return StatementTypeInvalid
 	}
 	return r.stmtType
+}
+
+// ReturnType returns the DuckDB result category (QUERY_RESULT, CHANGED_ROWS,
+// NOTHING, or INVALID) for the current result set, remaining readable after Close.
+func (r *Rows) ReturnType() ResultType {
+	if r == nil {
+		return ResultTypeInvalid
+	}
+	return r.returnType
 }
 
 // Next advances the cursor by one row, streaming one native chunk at a time.
@@ -198,7 +208,7 @@ func (r *Rows) DecodeRow(dst []Value) ([]Value, error) {
 	}
 	api := c.api
 	var rowBytes uint64
-	for i := 0; i < ncol; i++ {
+	for i := range ncol {
 		vec := api.DataChunkGetVector(r.chunk, uint64(i))
 		v, err := decodeVectorValue(api, &r.plans[i], vec, r.rowIdx, r.limits)
 		if err != nil {

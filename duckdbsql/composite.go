@@ -50,7 +50,7 @@ func encodeStructFromGo(rv reflect.Value, depth int) (duckdb.StructValue, error)
 	if depth > 64 {
 		return duckdb.StructValue{}, fmt.Errorf("%w: Composite struct nesting exceeds depth limit", duckdb.ErrLimitExceeded)
 	}
-	for rv.Kind() == reflect.Ptr {
+	for rv.Kind() == reflect.Pointer {
 		if rv.IsNil() {
 			return duckdb.StructValue{}, fmt.Errorf("%w: nil pointer struct", duckdb.ErrInvalidInput)
 		}
@@ -102,11 +102,11 @@ func encodeStructField(fv reflect.Value, depth int) (duckdb.Value, duckdb.Logica
 		// If fv is a nested Go struct (not a known duckdb scalar/driver.Valuer),
 		// encode it recursively as a DuckDB STRUCT.
 		t := fv.Type()
-		for t.Kind() == reflect.Ptr {
+		for t.Kind() == reflect.Pointer {
 			t = t.Elem()
 		}
 		if t.Kind() == reflect.Struct && !isDirectScalarStructType(t) {
-			if fv.Kind() == reflect.Ptr && fv.IsNil() {
+			if fv.Kind() == reflect.Pointer && fv.IsNil() {
 				lt, ltErr := inferLogicalTypeFromGoType(t, depth)
 				if ltErr != nil {
 					return duckdb.Value{}, duckdb.LogicalType{}, ltErr
@@ -183,7 +183,7 @@ func decodeStructInto(st duckdb.StructValue, dst reflect.Value, depth int) error
 	if depth > 64 {
 		return fmt.Errorf("%w: Composite struct nesting exceeds depth limit", duckdb.ErrLimitExceeded)
 	}
-	if dst.Kind() == reflect.Ptr {
+	if dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
 		}
@@ -246,7 +246,7 @@ func assignDuckDBValue(v duckdb.Value, dst reflect.Value, depth int) error {
 	}
 
 	// Unwrap pointers for non-null values.
-	for dst.Kind() == reflect.Ptr {
+	for dst.Kind() == reflect.Pointer {
 		if dst.IsNil() {
 			dst.Set(reflect.New(dst.Type().Elem()))
 		}

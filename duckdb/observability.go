@@ -108,7 +108,7 @@ func (c *Conn) ProfilingMetric(key string) (string, bool, error) {
 	if n > c.limits.MaxCollectionLen || n > math.MaxInt {
 		return "", false, fmt.Errorf("%w: profiling metrics count %d exceeds %d", ErrLimitExceeded, n, c.limits.MaxCollectionLen)
 	}
-	for i := uint64(0); i < n; i++ {
+	for i := range n {
 		kVal := api.GetMapKey(metricsVal, i)
 		var kStr string
 		if kVal != 0 {
@@ -149,7 +149,7 @@ func snapshotProfilingNode(api *abi.API, node uintptr, depth int, limits DecodeL
 		if n > limits.MaxCollectionLen || n > math.MaxInt {
 			return nil, fmt.Errorf("%w: profiling metrics count %d exceeds %d", ErrLimitExceeded, n, limits.MaxCollectionLen)
 		}
-		for i := uint64(0); i < n; i++ {
+		for i := range n {
 			kVal := api.GetMapKey(metricsVal, i)
 			vVal := api.GetMapValue(metricsVal, i)
 			var kStr, vStr string
@@ -177,7 +177,7 @@ func snapshotProfilingNode(api *abi.API, node uintptr, depth int, limits DecodeL
 	}
 	if childCount > 0 {
 		info.Children = make([]*ProfilingInfo, 0, int(childCount))
-		for i := uint64(0); i < childCount; i++ {
+		for i := range childCount {
 			child := api.ProfilingInfoGetChild(node, i)
 			if child == 0 {
 				continue

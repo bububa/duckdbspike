@@ -414,6 +414,19 @@ type API struct {
 	CatalogEntryGetType     func(entry uintptr) int32
 	CatalogEntryGetName     func(entry uintptr) uintptr
 	DestroyCatalogEntry     func(entry *uintptr)
+
+	// External threading / task execution (v0.4.0+ / v0.5.0+ stable).
+	// CreateTaskState returns an owned duckdb_task_state (opaque void*)
+	// released by DestroyTaskState (passed by value, NOT pointer-to-handle)
+	// only after all concurrent ExecuteTasksState / ExecuteNTasksState calls
+	// on that state have returned.
+	ExecuteTasks        func(database uintptr, maxTasks uint64)
+	CreateTaskState     func(database uintptr) uintptr
+	ExecuteTasksState   func(state uintptr)
+	ExecuteNTasksState  func(state uintptr, maxTasks uint64) uint64
+	FinishExecution     func(state uintptr)
+	TaskStateIsFinished func(state uintptr) bool
+	DestroyTaskState    func(state uintptr)
 }
 
 // symbol pairs an API field with its exported native name.
@@ -711,5 +724,12 @@ func (a *API) symbols() []symbol {
 		{&a.CatalogEntryGetType, "duckdb_catalog_entry_get_type"},
 		{&a.CatalogEntryGetName, "duckdb_catalog_entry_get_name"},
 		{&a.DestroyCatalogEntry, "duckdb_destroy_catalog_entry"},
+		{&a.ExecuteTasks, "duckdb_execute_tasks"},
+		{&a.CreateTaskState, "duckdb_create_task_state"},
+		{&a.ExecuteTasksState, "duckdb_execute_tasks_state"},
+		{&a.ExecuteNTasksState, "duckdb_execute_n_tasks_state"},
+		{&a.FinishExecution, "duckdb_finish_execution"},
+		{&a.TaskStateIsFinished, "duckdb_task_state_is_finished"},
+		{&a.DestroyTaskState, "duckdb_destroy_task_state"},
 	}
 }

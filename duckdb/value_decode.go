@@ -192,7 +192,7 @@ func decodeNativeValue(api *abi.API, val uintptr, depth int, limits DecodeLimits
 			return Value{}, fmt.Errorf("%w: list length %d exceeds %d", ErrLimitExceeded, n, limits.MaxCollectionLen)
 		}
 		elems := make([]Value, int(n))
-		for i := uint64(0); i < n; i++ {
+		for i := range n {
 			child := api.GetListChild(val, i)
 			v, cerr := decodeNativeValue(api, child, depth+1, limits)
 			if child != 0 {
@@ -207,7 +207,7 @@ func decodeNativeValue(api *abi.API, val uintptr, depth int, limits DecodeLimits
 	case TypeStruct:
 		n := len(plan.lt.Fields)
 		fields := make([]StructFieldValue, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			child := api.GetStructChild(val, uint64(i))
 			v, cerr := decodeNativeValue(api, child, depth+1, limits)
 			if child != 0 {
@@ -229,7 +229,7 @@ func decodeNativeValue(api *abi.API, val uintptr, depth int, limits DecodeLimits
 			return Value{}, fmt.Errorf("%w: map size %d exceeds %d", ErrLimitExceeded, n, limits.MaxCollectionLen)
 		}
 		entries := make([]MapEntry, int(n))
-		for i := uint64(0); i < n; i++ {
+		for i := range n {
 			kHandle := api.GetMapKey(val, i)
 			kVal, kerr := decodeNativeValue(api, kHandle, depth+1, limits)
 			if kHandle != 0 {

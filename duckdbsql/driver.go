@@ -101,16 +101,16 @@ func ParseDSN(dsn string) (string, []duckdb.Option, error) {
 	}
 	path := dsn
 	var rawQuery string
-	if idx := strings.IndexByte(dsn, '?'); idx >= 0 {
-		path = dsn[:idx]
-		rawQuery = dsn[idx+1:]
+	if before, after, ok := strings.Cut(dsn, "?"); ok {
+		path = before
+		rawQuery = after
 	}
 	if path == "" {
 		path = ":memory:"
 	}
 	var opts []duckdb.Option
 	if rawQuery != "" {
-		for _, pair := range strings.Split(rawQuery, "&") {
+		for pair := range strings.SplitSeq(rawQuery, "&") {
 			if pair == "" {
 				continue
 			}

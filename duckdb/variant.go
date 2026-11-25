@@ -74,7 +74,7 @@ func validateVariantLogicalType(api *abi.API, lt uintptr) error {
 			}
 		}
 	}()
-	for i := uint64(0); i < 4; i++ {
+	for i := range uint64(4) {
 		namePtr := api.StructTypeChildName(lt, i)
 		name := abi.GoString(namePtr)
 		if namePtr != 0 {
@@ -138,7 +138,7 @@ func checkVariantListStruct(api *abi.API, lt uintptr, name string, wantFields [2
 	if got := api.StructTypeChildCount(elem); got != 2 {
 		return fmt.Errorf("%w: VARIANT child %q element struct has %d fields, want 2", ErrUnsupportedType, name, got)
 	}
-	for i := uint64(0); i < 2; i++ {
+	for i := range uint64(2) {
 		nPtr := api.StructTypeChildName(elem, i)
 		fname := abi.GoString(nPtr)
 		if nPtr != 0 {
@@ -298,7 +298,7 @@ func decodeUvarint32(buf []byte) (uint32, int, error) {
 		return 0, 0, fmt.Errorf("%w: truncated VARIANT varint", ErrInvalidInput)
 	}
 	var val uint32
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if i >= len(buf) {
 			return 0, 0, fmt.Errorf("%w: truncated VARIANT varint", ErrInvalidInput)
 		}
@@ -643,7 +643,7 @@ func (d *variantRowDecoder) decodeObject(valIdx uint32, payload []byte, depth in
 
 	fields := make([]StructFieldValue, int(count))
 	fieldTypes := make([]StructFieldType, int(count))
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		absChildRow := d.childrenEntry.Offset + uint64(childrenIdx) + uint64(i)
 		if !rowValid(d.childKeysValid, absChildRow) || !rowValid(d.childValsValid, absChildRow) {
 			return Value{}, fmt.Errorf("%w: VARIANT OBJECT child %d has NULL key/value index", ErrInvalidInput, i)
@@ -683,7 +683,7 @@ func (d *variantRowDecoder) decodeArray(valIdx uint32, payload []byte, depth int
 	defer delete(d.visiting, valIdx)
 
 	elems := make([]Value, int(count))
-	for i := uint32(0); i < count; i++ {
+	for i := range count {
 		absChildRow := d.childrenEntry.Offset + uint64(childrenIdx) + uint64(i)
 		if !rowValid(d.childValsValid, absChildRow) {
 			return Value{}, fmt.Errorf("%w: VARIANT ARRAY element %d has NULL values_index", ErrInvalidInput, i)

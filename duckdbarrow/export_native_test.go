@@ -39,7 +39,7 @@ func buildRichBatch(t *testing.T, alloc memory.Allocator, n int) arrow.RecordBat
 	metaKB := metaB.FieldBuilder(0).(*array.StringBuilder)
 	metaVB := metaB.FieldBuilder(1).(*array.Int32Builder)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		idB.Append(int64(i + 1))
 		if i%5 == 0 {
 			nameB.AppendNull()

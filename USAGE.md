@@ -18,6 +18,21 @@ Practical examples for `github.com/bububa/duckdbspike` (`duckdb`, `duckdbsql`, a
 
 `duckdb.Load` verifies platform acceptance, path permissions, SHA-256 checksum, symbol resolution, and DuckDB version (`v1.5.6`) atomically before exposing `*duckdb.Library`.
 
+If you prefer automatic discovery across platform library paths (`DYLD_*` / `LD_LIBRARY_PATH` / `/etc/ld.so.conf` / `PATH` / standard OS dirs) with SHA-256-verified fallback download into a versioned `0700` cache directory, use `duckdb.AutoLoad`:
+
+```go
+lib, err := duckdb.AutoLoad(
+	ctx,
+	"/var/cache/myapp/duckdb", // empty string defaults to os.UserCacheDir()/duckdbspike
+	// Optional:
+	// duckdb.WithSearchPaths("/opt/custom/lib"),
+	// duckdb.WithDownloadBaseURL("https://artifacts.internal/duckdb"),
+	// duckdb.WithDisableDownload(true), // strict offline mode
+)
+```
+
+For explicit manual loading with a pinned path and checksum:
+
 ```go
 package main
 
@@ -199,7 +214,7 @@ func exampleSQL(ctx context.Context, lib *duckdb.Library) error {
 		return err
 	}
 
-	// Composite[T] round-trips Go structs to/from DuckDB STRUCT columns.
+	// Composite[T] and Go 1.22+ sql.Null[T] round-trip exact DuckDB types.
 	zip := int32(10001)
 	in := duckdbsql.NewComposite(Profile{
 		Name:    "alice",
@@ -212,6 +227,16 @@ func exampleSQL(ctx context.Context, lib *duckdb.Library) error {
 		return err
 	}
 	fmt.Printf("profile=%+v\n", out.Get())
+
+	// sql.Null[T] works for both parameter binding and scanning on exact duckdb.* types.
+	var gotDec sql.Null[duckdb.Decimal]
+	inDec := sql.Null[duckdb.Decimal]{
+		V:     duckdb.Decimal{Width: 10, Scale: 2, Value: duckdb.HugeintFromInt64(12345)},
+		Valid: true,
+	}
+	if err := db.QueryRowContext(ctx, `SELECT ?`, inDec).Scan(&gotDec); err != nil {
+		return err
+	}
 
 	// Multi-result-set scripts via standard sql.Rows.NextResultSet().
 	rows, err := db.QueryContext(ctx, `
@@ -518,7 +543,7 @@ defer ws.Close()
 // Place input files into ws.InputDir() (globs are intentionally rejected).
 session, err := ws.OpenReadOnly(ctx, lib, duckdb.ReadOnlySessionSpec{
 	Budget: bc,
-	Instance: duckdb.InstanceConfig{
+	Config: duckdb.InstanceConfig{
 		NativeMemoryBytes: 512 << 20,
 		Threads:           2,
 		MaxSpillBytes:     1 << 30,
@@ -550,4 +575,42 @@ var count int64
 if err := sqlDB.QueryRowContext(qCtx, `SELECT count(*) FROM events`).Scan(&count); err != nil {
 	return err
 }
+```
+
+---
+
+## 8. External Worker Thread Scheduling (`TaskState`)
+
+When opening a database with `external_threads` (where `threads >= external_threads`), Go goroutines can cooperatively execute DuckDB tasks via `Database.NewTaskState` / `Database.ExecuteTasks`. `TaskState.Close` (and `Database.Close`) signals and joins every active worker before destroying the native handle.
+
+```go
+db, err := lib.Open(ctx, ":memory:",
+	duckdb.Option{Name: "threads", Value: "3"},
+	duckdb.Option{Name: "external_threads", Value: "2"},
+)
+if err != nil {
+	return err
+}
+defer db.Close()
+
+ts, err := db.NewTaskState()
+if err != nil {
+	return err
+}
+defer ts.Close() // wakes and joins all worker goroutines before native destroy
+
+var wg sync.WaitGroup
+for range 2 {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_ = ts.Execute()
+	}()
+}
+
+// Queries on connections from db will now utilize both external workers.
+// ...
+ts.Finish()
+_ = ts.Close()
+wg.Wait()
 ```
