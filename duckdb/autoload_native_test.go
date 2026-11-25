@@ -87,7 +87,17 @@ func TestNativeAutoLoadDiscoveryAndDownload(t *testing.T) {
 		}),
 	}
 
-	dlDir := t.TempDir()
+	// On Windows, a DLL mapped into the current process cannot be unlinked
+	// before process exit (and we deliberately never unload native libraries
+	// via FreeLibrary). Use os.MkdirTemp with best-effort cleanup instead of
+	// t.TempDir so Windows cleanup does not fail with ERROR_ACCESS_DENIED.
+	dlDir, err := os.MkdirTemp("", "duckdb-autoload-native-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(dlDir)
+	})
 	lib2, err := duckdb.AutoLoad(
 		ctx,
 		dlDir,
