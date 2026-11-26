@@ -11,10 +11,13 @@ import (
 )
 
 // TableFunctionBindInput supplies the decoded positional and named arguments
-// passed to a TableFunction's Bind callback.
+// passed to a TableFunction's Bind callback. When the table function is used as
+// a COPY ... FROM handler, TargetColumns contains the destination table schema
+// pre-populated by DuckDB (and Bind should not return new Columns).
 type TableFunctionBindInput struct {
-	Args      []Value
-	NamedArgs map[string]Value
+	Args          []Value
+	NamedArgs     map[string]Value
+	TargetColumns []Column
 }
 
 // TableFunctionBindResult declares the output schema, optional cardinality
@@ -280,64 +283,112 @@ func (tableFuncDispatcher) Bind(info uintptr) {
 		}
 	}
 
+	// When invoked as a COPY ... FROM handler, DuckDB pre-populates the target
+	// table's columns on bind_info and forbids calling BindAddResultColumn.
+	var targetCols []Column
+	var targetPlans []columnPlan
+	if api.TableFunctionBindGetResultColumnCount != nil {
+		targetCount := api.TableFunctionBindGetResultColumnCount(info)
+		if targetCount > def.limits.MaxCollectionLen || targetCount > math.MaxInt {
+			setBindErr(api, info, fmt.Sprintf("table function %q target column count %d exceeds limit", def.spec.Name, targetCount))
+			return
+		}
+		if targetCount > 0 {
+			targetCols = make([]Column, int(targetCount))
+			targetPlans = make([]columnPlan, int(targetCount))
+			for i := range targetCount {
+				colName := abi.GoString(api.TableFunctionBindGetResultColumnName(info, i))
+				ltHandle := api.TableFunctionBindGetResultColumnType(info, i)
+				plan, err := buildColumnPlan(api, ltHandle, 0, def.limits)
+				if ltHandle != 0 {
+					api.DestroyLogicalType(&ltHandle)
+				}
+				if err != nil {
+					setBindErr(api, info, fmt.Sprintf("table function %q target column %d (%q): %v", def.spec.Name, i, colName, err))
+					return
+				}
+				targetCols[i] = Column{Name: colName, Type: plan.lt}
+				targetPlans[i] = plan
+			}
+		}
+	}
+
+	var targetColsInput []Column
+	if len(targetCols) > 0 {
+		targetColsInput = make([]Column, len(targetCols))
+		for i, col := range targetCols {
+			targetColsInput[i] = Column{Name: col.Name, Type: *cloneLogicalType(col.Type)}
+		}
+	}
+
 	res, err := def.spec.Bind(TableFunctionBindInput{
-		Args:      args,
-		NamedArgs: namedArgs,
+		Args:          args,
+		NamedArgs:     namedArgs,
+		TargetColumns: targetColsInput,
 	})
 	if err != nil {
 		setBindErr(api, info, err.Error())
 		return
 	}
-	if len(res.Columns) == 0 {
-		setBindErr(api, info, fmt.Sprintf("table function %q bind returned no result columns", def.spec.Name))
-		return
-	}
 
-	ltHandles := make([]uintptr, len(res.Columns))
-	defer func() {
-		for i := range ltHandles {
-			if ltHandles[i] != 0 {
-				api.DestroyLogicalType(&ltHandles[i])
+	var cols []Column
+	var plans []columnPlan
+	if len(targetCols) > 0 {
+		// COPY ... FROM mode: use target table columns without calling BindAddResultColumn.
+		cols = targetCols
+		plans = targetPlans
+	} else {
+		if len(res.Columns) == 0 {
+			setBindErr(api, info, fmt.Sprintf("table function %q bind returned no result columns", def.spec.Name))
+			return
+		}
+
+		ltHandles := make([]uintptr, len(res.Columns))
+		defer func() {
+			for i := range ltHandles {
+				if ltHandles[i] != 0 {
+					api.DestroyLogicalType(&ltHandles[i])
+				}
 			}
-		}
-	}()
-	cnames := make([][]byte, len(res.Columns))
-	cols := make([]Column, len(res.Columns))
-	plans := make([]columnPlan, len(res.Columns))
+		}()
+		cnames := make([][]byte, len(res.Columns))
+		cols = make([]Column, len(res.Columns))
+		plans = make([]columnPlan, len(res.Columns))
 
-	for i, col := range res.Columns {
-		if col.Name == "" {
-			setBindErr(api, info, fmt.Sprintf("table function %q result column %d has empty name", def.spec.Name, i))
-			return
+		for i, col := range res.Columns {
+			if col.Name == "" {
+				setBindErr(api, info, fmt.Sprintf("table function %q result column %d has empty name", def.spec.Name, i))
+				return
+			}
+			if col.Type.Kind == TypeAny {
+				setBindErr(api, info, fmt.Sprintf("table function %q result column %q cannot have ANY type", def.spec.Name, col.Name))
+				return
+			}
+			cname, err := abi.CString(col.Name)
+			if err != nil {
+				setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
+				return
+			}
+			ltHandle, err := createNativeLogicalType(api, col.Type, 0, def.limits)
+			if err != nil {
+				setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
+				return
+			}
+			ltHandles[i] = ltHandle
+			plan, err := buildColumnPlan(api, ltHandle, 0, def.limits)
+			if err != nil {
+				setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
+				return
+			}
+			cnames[i] = cname
+			plans[i] = plan
+			cols[i] = Column{Name: col.Name, Type: plan.lt}
 		}
-		if col.Type.Kind == TypeAny {
-			setBindErr(api, info, fmt.Sprintf("table function %q result column %q cannot have ANY type", def.spec.Name, col.Name))
-			return
-		}
-		cname, err := abi.CString(col.Name)
-		if err != nil {
-			setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
-			return
-		}
-		ltHandle, err := createNativeLogicalType(api, col.Type, 0, def.limits)
-		if err != nil {
-			setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
-			return
-		}
-		ltHandles[i] = ltHandle
-		plan, err := buildColumnPlan(api, ltHandle, 0, def.limits)
-		if err != nil {
-			setBindErr(api, info, fmt.Sprintf("table function %q result column %q: %v", def.spec.Name, col.Name, err))
-			return
-		}
-		cnames[i] = cname
-		plans[i] = plan
-		cols[i] = Column{Name: col.Name, Type: plan.lt}
-	}
 
-	for i := range res.Columns {
-		api.BindAddResultColumn(info, &cnames[i][0], ltHandles[i])
-		runtime.KeepAlive(cnames[i])
+		for i := range res.Columns {
+			api.BindAddResultColumn(info, &cnames[i][0], ltHandles[i])
+			runtime.KeepAlive(cnames[i])
+		}
 	}
 
 	if res.Cardinality > 0 || res.ExactCard {
@@ -623,29 +674,26 @@ func (tx *Tx) RegisterTableFunction(spec TableFunctionSpec) error {
 	return tx.conn.registerTableFunctionWithTx(tx, spec)
 }
 
-func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error {
-	if c == nil {
-		return ErrClosed
-	}
+func buildNativeTableFunctionLocked(api *abi.API, limits DecodeLimits, spec TableFunctionSpec) (uintptr, uintptr, error) {
 	if spec.Name == "" {
-		return fmt.Errorf("%w: table function name must not be empty", ErrInvalidInput)
+		return 0, 0, fmt.Errorf("%w: table function name must not be empty", ErrInvalidInput)
 	}
 	if spec.Bind == nil {
-		return fmt.Errorf("%w: table function %q requires Bind callback", ErrInvalidInput, spec.Name)
+		return 0, 0, fmt.Errorf("%w: table function %q requires Bind callback", ErrInvalidInput, spec.Name)
 	}
 	if spec.Execute == nil {
-		return fmt.Errorf("%w: table function %q requires Execute callback", ErrInvalidInput, spec.Name)
+		return 0, 0, fmt.Errorf("%w: table function %q requires Execute callback", ErrInvalidInput, spec.Name)
 	}
 
 	cname, err := abi.CString(spec.Name)
 	if err != nil {
-		return fmt.Errorf("%w: table function name %q: %v", ErrInvalidInput, spec.Name, err)
+		return 0, 0, fmt.Errorf("%w: table function name %q: %v", ErrInvalidInput, spec.Name, err)
 	}
 
 	namedNames := make([]string, 0, len(spec.NamedParameters))
 	for k := range spec.NamedParameters {
 		if k == "" {
-			return fmt.Errorf("%w: table function %q has empty named parameter name", ErrInvalidInput, spec.Name)
+			return 0, 0, fmt.Errorf("%w: table function %q has empty named parameter name", ErrInvalidInput, spec.Name)
 		}
 		namedNames = append(namedNames, k)
 	}
@@ -654,29 +702,19 @@ func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error
 	for i, name := range namedNames {
 		cb, err := abi.CString(name)
 		if err != nil {
-			return fmt.Errorf("%w: table function %q named parameter %q: %v", ErrInvalidInput, spec.Name, name, err)
+			return 0, 0, fmt.Errorf("%w: table function %q named parameter %q: %v", ErrInvalidInput, spec.Name, name, err)
 		}
 		namedCStrs[i] = cb
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.checkTxLocked(tx); err != nil {
-		return err
-	}
-	if err := c.usableLocked(); err != nil {
-		return err
-	}
-
-	api := c.api
 	tf := api.CreateTableFunction()
 	if tf == 0 {
-		return nativeError("create_table_function", abi.ErrorOutOfMemory, "")
+		return 0, 0, nativeError("create_table_function", abi.ErrorOutOfMemory, "")
 	}
 
 	posTypes := make([]uintptr, len(spec.Parameters))
 	namedTypes := make([]uintptr, len(namedNames))
-	cleanupTypes := func() {
+	defer func() {
 		for i := range posTypes {
 			if posTypes[i] != 0 {
 				api.DestroyLogicalType(&posTypes[i])
@@ -687,22 +725,21 @@ func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error
 				api.DestroyLogicalType(&namedTypes[i])
 			}
 		}
-	}
-	defer cleanupTypes()
+	}()
 
 	for i, pt := range spec.Parameters {
-		lt, err := createNativeLogicalType(api, pt, 0, c.limits)
+		lt, err := createNativeLogicalType(api, pt, 0, limits)
 		if err != nil {
 			api.DestroyTableFunction(&tf)
-			return fmt.Errorf("table function %q parameter %d: %w", spec.Name, i, err)
+			return 0, 0, fmt.Errorf("table function %q parameter %d: %w", spec.Name, i, err)
 		}
 		posTypes[i] = lt
 	}
 	for i, name := range namedNames {
-		lt, err := createNativeLogicalType(api, spec.NamedParameters[name], 0, c.limits)
+		lt, err := createNativeLogicalType(api, spec.NamedParameters[name], 0, limits)
 		if err != nil {
 			api.DestroyTableFunction(&tf)
-			return fmt.Errorf("table function %q named parameter %q: %w", spec.Name, name, err)
+			return 0, 0, fmt.Errorf("table function %q named parameter %q: %w", spec.Name, name, err)
 		}
 		namedTypes[i] = lt
 	}
@@ -716,7 +753,7 @@ func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error
 
 	def := &tableFuncDef{
 		api:             api,
-		limits:          c.limits,
+		limits:          limits,
 		vectorSize:      vecSize,
 		spec:            spec,
 		namedParamNames: namedNames,
@@ -749,6 +786,28 @@ func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error
 	api.TableFunctionSetFunction(tf, abi.TableFunctionExecCallback())
 	if spec.ProjectionPushdown {
 		api.TableFunctionSupportsProjectionPushdown(tf, true)
+	}
+	return tf, extraID, nil
+}
+
+func (c *Conn) registerTableFunctionWithTx(tx *Tx, spec TableFunctionSpec) error {
+	if c == nil {
+		return ErrClosed
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.checkTxLocked(tx); err != nil {
+		return err
+	}
+	if err := c.usableLocked(); err != nil {
+		return err
+	}
+
+	api := c.api
+	tf, extraID, err := buildNativeTableFunctionLocked(api, c.limits, spec)
+	if err != nil {
+		return err
 	}
 
 	state := api.RegisterTableFunction(c.handle, tf)

@@ -17,7 +17,7 @@ See **[USAGE.md](USAGE.md)** for complete code examples and **[DEVELOPMENT.md](D
 
 | Package       | Purpose                                                                                                                                                                                                                                                                                                                     | External Dependencies                 |
 | :------------ | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------ |
-| `duckdb`      | Core engine API: verified `Load` & `AutoLoad` (cross-platform discovery + SHA-256-verified download), `Database`, `InstanceCache`, `TaskState`/`ExecuteTasks`, `Conn`, `Tx`, `Stmt`, streaming `Rows`/`ArrowRows` (multi-result-set), chunk-buffered `Appender` & `QueryAppender` (incl. `GEOMETRY` & `VARIANT`), pure-Go extensions (`RegisterScalarFunction[Set]`, `RegisterAggregateFunction[Set]`, `RegisterCastFunction`, `RegisterTableFunction`, `AddReplacementScan`, `RegisterConfigOption`, `RegisterLogicalType`), Arrow C Data/Stream interop, Client VFS (`File`), `Catalog` metadata, `BudgetController`, `ReadOnlySession`, `QueryProgress`/`ProfilingInfo`. | `github.com/ebitengine/purego`        |
+| `duckdb`      | Core engine API: verified `Load` & `AutoLoad` (cross-platform discovery + SHA-256-verified download), `Database`, `InstanceCache`, `TaskState`/`ExecuteTasks`, `Conn`, `Tx`, `Stmt`, streaming `Rows`/`ArrowRows` (multi-result-set), chunk-buffered `Appender` & `QueryAppender` (incl. `GEOMETRY` & `VARIANT`), pure-Go extensions (`RegisterScalarFunction[Set]`, `RegisterAggregateFunction[Set]`, `RegisterCastFunction`, `RegisterTableFunction`, `RegisterCopyFunction`, `AddReplacementScan`, `RegisterLogStorage`, `RegisterConfigOption`, `RegisterLogicalType`), Arrow C Data/Stream interop, Client VFS (`File`), `Catalog` metadata, `BudgetController`, `ReadOnlySession`, `QueryProgress`/`ProfilingInfo`. | `github.com/ebitengine/purego`        |
 | `duckdbsql`   | Full `database/sql/driver` adapter (`NewConnector`, `NewReadOnlyConnector`, `Register`, `WithDBInit`/`WithConnInit`, `WithTimeScan`, `Composite[T]`, `sql.Null[T]` + Go `[]T`/`[N]T`/`map[K]V` binding, `driver.RowsNextResultSet`, `RawConn`).                                                                                                                                      | `duckdb` (stdlib `database/sql` only) |
 | `duckdbarrow` | Pure-Go (`CGO_ENABLED=0`) `apache/arrow-go/v18` integration (`Query`/`QueryStmt`/`QueryScript` -> `array.RecordReader`, `StmtSchema`, bidirectional `ExtensionType` + C Data `ExportSchema`/`ExportRecordBatch`, `AppendRecordBatch`/`AppendRecordReader`, `RegisterRecordBatch`/`RegisterRecordReader`).                                                                           | `github.com/apache/arrow-go/v18`      |
 
@@ -42,24 +42,20 @@ See **[USAGE.md](USAGE.md)** for complete code examples and **[DEVELOPMENT.md](D
 | Client VFS (`duckdb_file_system_*`) & `Catalog`      | Not exposed in Go API                                       | **`Conn.OpenFile` (`io.ReadWriteSeeker`)** & **`CatalogTypeName`/`LookupCatalogEntry`**                                                                    |
 | External Threading (`duckdb_execute_tasks*`)         | Not exposed in Go API                                       | **`Database.ExecuteTasks`** & **`Database.NewTaskState` (`*TaskState`)** with UAF-safe shutdown join                                                       |
 | Resource budgeting & read-only isolation             | Manual SQL / OS limits                                      | Built-in **`BudgetController`**, `DecodeLimits`/`ResultLimits`, and **`ReadOnlySession`**                                                                  |
-| **Extensions & Engine Hooks (UDFs/Table/Copy/Cast)** | **Supported** (Scalar/Aggregate/Table/Copy/ReplacementScan) | **Supported (`CGO_ENABLED=0`)**: **`RegisterScalarFunction[Set]`**, **`RegisterAggregateFunction[Set]`**, **`RegisterCastFunction`**, **`RegisterTableFunction`**, **`AddReplacementScan`**, **`RegisterConfigOption`**, **`RegisterLogicalType`**; Copy Functions & Log Storage not yet implemented |
+| **Extensions & Engine Hooks (UDFs/Table/Copy/Cast)** | **Supported** (Scalar/Aggregate/Table/Copy/ReplacementScan) | **Full (`CGO_ENABLED=0`)**: **`RegisterScalarFunction[Set]`**, **`RegisterAggregateFunction[Set]`**, **`RegisterCastFunction`**, **`RegisterTableFunction`**, **`RegisterCopyFunction`** (`COPY TO`/`FROM`), **`AddReplacementScan`**, **`RegisterLogStorage`**, **`RegisterConfigOption`**, **`RegisterLogicalType`** |
 
-### Important Unimplemented / Intentionally Excluded Features
+### Important Boundaries & Intentionally Excluded Native Paths
 
 Please review these explicit boundaries before adopting `duckdbspike`:
 
-1. **Remaining Unimplemented Engine Extension Hooks**:
-   - **Supported (`CGO_ENABLED=0`)**: **Scalar Functions & Sets** (`Bind`/`Init`/varargs/volatile/`SpecialNulls`), **Aggregate Functions & Sets** (parallel `GROUP BY` + GC-safe handle-ID state), **Custom Cast Functions** (`CAST`/`TRY_CAST`/implicit cost), **Table Functions** (positional/named/`AnyType`, `ProjectionPushdown`, multi-threaded `MaxThreads` + `LocalInit`), **Replacement Scans**, **Custom Config Options**, and **Custom Logical Types**.
-   - **Not yet implemented**: **Custom Copy Functions** (`COPY TO`) and **Custom Log Storage**.
-   - _(Note: DuckDB's own built-in/official SQL extensions can still be loaded via SQL `INSTALL`/`LOAD` when external access is enabled.)_
-2. **Intentionally Disallowed Native Paths**:
+1. **Intentionally Disallowed Native Paths**:
    - **Non-streaming queries (`duckdb_pending_prepared`)** are never used; `Query` always enforces streaming results (`ErrNotStreaming` if DuckDB materializes a result such as `INSERT ... RETURNING`).
    - **Lossy numeric C helpers** (`duckdb_decimal_to_double`, `duckdb_hugeint_to_double`, etc.) are never used; all exact numeric values stay lossless.
    - **Library unloading (`dlclose` / `FreeLibrary`)** is never called; mapped libraries live for the process lifetime.
-3. **DuckDB `v1.5.6` Upstream C API Boundaries**:
+2. **DuckDB `v1.5.6` Upstream C API Boundaries**:
    - **`GEOMETRY` and `VARIANT` prepared-statement parameter binding**: DuckDB `v1.5.6` C API does not provide `duckdb_create_geometry` or `duckdb_create_variant` constructors. Both types support full decoding **and** bulk chunk `Appender` / `QueryAppender` writes, while direct SQL parameter binding returns `ErrUnsupportedType` (use SQL casts such as `ST_GeomFromWKB(?::BLOB)` / `CAST(? AS VARIANT)` or `NewQueryAppender`).
    - **`duckdb_arrow_scan` / `duckdb_arrow_array_scan` projection-pushdown quirk**: In DuckDB `v1.5.6`, querying a registered Arrow view while skipping leading columns (e.g. `SELECT col2 FROM arrow_view`) can crash inside DuckDB's C++ `FactoryGetNext`. Project all columns from Arrow views, or ingest into a temporary table via `duckdbarrow.AppendRecordReader` for arbitrary column projections.
-4. **Platform Gate (`darwin/amd64` unsupported)**:
+3. **Platform Gate (`darwin/amd64` unsupported)**:
    - Only platforms with recorded real-native acceptance runs are allowed at load time (`darwin/arm64`, `linux/amd64`, `linux/arm64`, `windows/amd64`). Unverified platforms fail with `ErrUnsupportedPlatform`.
 
 ---

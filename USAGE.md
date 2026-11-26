@@ -12,7 +12,7 @@ Practical examples for `github.com/bububa/duckdbspike` (`duckdb`, `duckdbsql`, a
 6. [Transactions, `InstanceCache`, Multi-Statement Scripts, Observability, VFS & `Catalog`](#6-transactions-instancecache-multi-statement-scripts-observability-vfs--catalog)
 7. [Production Safety (`BudgetController`, Limits, Cancellation, & `ReadOnlySession`)](#7-production-safety-budgetcontroller-limits-cancellation--readonlysession)
 8. [External Worker Thread Scheduling (`TaskState`)](#8-external-worker-thread-scheduling-taskstate)
-9. [Pure-Go Extensions: Scalar, Aggregate, Cast, Table Functions & Replacement Scans](#9-pure-go-extensions-scalar-aggregate-cast-table-functions--replacement-scans)
+9. [Pure-Go Extensions: Scalar, Aggregate, Cast, Table, Copy Functions, Replacement Scans & Log Storage](#9-pure-go-extensions-scalar-aggregate-cast-table-copy-functions-replacement-scans--log-storage)
 
 ---
 
@@ -619,9 +619,9 @@ wg.Wait()
 
 ---
 
-## 9. Pure-Go Extensions: Scalar, Aggregate, Cast, Table Functions & Replacement Scans
+## 9. Pure-Go Extensions: Scalar, Aggregate, Cast, Table, Copy Functions, Replacement Scans & Log Storage
 
-Pure-Go (`CGO_ENABLED=0`) extensions run on a fixed 17-slot process-wide singleton `purego` callback switchboard (no callback slot exhaustion, GC-safe integer handle IDs, and panic-safe C++/Go boundaries).
+All DuckDB `v1.5.6` stable C extension and hook APIs run with **`CGO_ENABLED=0`** on a fixed 22-slot process-wide singleton `purego` callback switchboard (no callback slot exhaustion, GC-safe integer handle IDs, and panic-safe C++/Go boundaries).
 
 ```go
 // 1. Register a custom runtime config option readable via ConfigOptionAs / SQL SET.
@@ -748,4 +748,34 @@ if err := conn.RegisterCastFunction(duckdb.CastFunctionSpec{
 }); err != nil {
 	return err
 }
+
+// 8. Register a Custom Copy Function (`COPY ... TO` and optional `COPY ... FROM`).
+if err := conn.RegisterCopyFunction(duckdb.CopyFunctionSpec{
+	Name: "go_lines",
+	GlobalInit: func(in duckdb.CopyFunctionGlobalInitInput) (any, error) {
+		return os.Create(in.FilePath)
+	},
+	Sink: func(_, gs any, chunk *duckdb.CopyFunctionChunk) error {
+		f := gs.(*os.File)
+		for r := range chunk.Len() {
+			v, _ := chunk.Value(0, r)
+			s, _ := v.Varchar()
+			_, _ = fmt.Fprintln(f, s)
+		}
+		return nil
+	},
+	Finalize: func(_, gs any) error {
+		return gs.(*os.File).Close()
+	},
+}); err != nil {
+	return err
+}
+
+// 9. Register a Custom Log Storage sink activated via SQL `CALL enable_logging(...)`.
+if err := db.RegisterLogStorage("go_logger", func(e duckdb.LogEntry) {
+	fmt.Printf("[%s] %s: %s\n", e.Level, e.Type, e.Message)
+}); err != nil {
+	return err
+}
+_, _ = conn.Exec(ctx, `CALL enable_logging(storage = 'go_logger', level = 'info')`)
 ```

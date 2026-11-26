@@ -85,6 +85,11 @@ func TestSingletonHookCallbacksAreStable(t *testing.T) {
 		{"agg_finalize", AggregateFinalizeCallback},
 		{"agg_destroy", AggregateDestroyCallback},
 		{"cast_exec", CastFunctionExecCallback},
+		{"copy_bind", CopyFunctionBindCallback},
+		{"copy_init", CopyFunctionGlobalInitCallback},
+		{"copy_sink", CopyFunctionSinkCallback},
+		{"copy_finalize", CopyFunctionFinalizeCallback},
+		{"log_write", LogStorageWriteCallback},
 	}
 
 	seen := make(map[uintptr]string, len(pairs))
@@ -99,7 +104,7 @@ func TestSingletonHookCallbacksAreStable(t *testing.T) {
 		}
 		seen[c1] = p.name
 	}
-	if len(seen) != 17 {
-		t.Fatalf("expected 17 distinct singleton callbacks, got %d", len(seen))
+	if len(seen) != 22 {
+		t.Fatalf("expected 22 distinct singleton callbacks, got %d", len(seen))
 	}
 }

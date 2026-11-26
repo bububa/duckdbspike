@@ -51,6 +51,22 @@ type CastFunctionDispatcher interface {
 	Execute(info uintptr, count uint64, input, output uintptr) bool
 }
 
+// CopyFunctionDispatcher routes DuckDB's 4 COPY ... TO C callbacks
+// (Bind, GlobalInit, Sink, Finalize) from process-wide singleton purego
+// trampolines into package duckdb.
+type CopyFunctionDispatcher interface {
+	Bind(info uintptr)
+	GlobalInit(info uintptr)
+	Sink(info, input uintptr)
+	Finalize(info uintptr)
+}
+
+// LogStorageHandler implements the Go side of a DuckDB custom log storage
+// registered via Database.RegisterLogStorage.
+type LogStorageHandler interface {
+	Write(timestampMicros int64, level, logType, message string)
+}
+
 type tableFunctionDispatcherBox struct {
 	d TableFunctionDispatcher
 }
@@ -65,6 +81,10 @@ type aggregateFunctionDispatcherBox struct {
 
 type castFunctionDispatcherBox struct {
 	d CastFunctionDispatcher
+}
+
+type copyFunctionDispatcherBox struct {
+	d CopyFunctionDispatcher
 }
 
 var (
@@ -106,6 +126,16 @@ var (
 	castFuncOnce     sync.Once
 	castFuncExecCB   uintptr
 	castFuncDispatch atomic.Pointer[castFunctionDispatcherBox]
+
+	copyFuncOnce       sync.Once
+	copyFuncBindCB     uintptr
+	copyFuncInitCB     uintptr
+	copyFuncSinkCB     uintptr
+	copyFuncFinalizeCB uintptr
+	copyFuncDispatch   atomic.Pointer[copyFunctionDispatcherBox]
+
+	logStorageOnce    sync.Once
+	logStorageWriteCB uintptr
 )
 
 // RegisterHookHandle stores v in the process-wide hook handle table and returns
@@ -487,4 +517,109 @@ func CastFunctionExecCallback() uintptr {
 		})
 	})
 	return castFuncExecCB
+}
+
+// SetCopyFunctionDispatcher installs the active dispatcher invoked by the 4
+// singleton CopyFunction C callbacks.
+func SetCopyFunctionDispatcher(d CopyFunctionDispatcher) {
+	if d == nil {
+		copyFuncDispatch.Store(nil)
+		return
+	}
+	copyFuncDispatch.Store(&copyFunctionDispatcherBox{d: d})
+}
+
+func ensureCopyFunctionCallbacks() {
+	copyFuncOnce.Do(func() {
+		copyFuncBindCB = purego.NewCallback(func(_ purego.CDecl, info uintptr) uintptr {
+			defer func() {
+				_ = recover()
+			}()
+			if box := copyFuncDispatch.Load(); box != nil && box.d != nil && info != 0 {
+				box.d.Bind(info)
+			}
+			return 0
+		})
+		copyFuncInitCB = purego.NewCallback(func(_ purego.CDecl, info uintptr) uintptr {
+			defer func() {
+				_ = recover()
+			}()
+			if box := copyFuncDispatch.Load(); box != nil && box.d != nil && info != 0 {
+				box.d.GlobalInit(info)
+			}
+			return 0
+		})
+		copyFuncSinkCB = purego.NewCallback(func(_ purego.CDecl, info, input uintptr) uintptr {
+			defer func() {
+				_ = recover()
+			}()
+			if box := copyFuncDispatch.Load(); box != nil && box.d != nil && info != 0 && input != 0 {
+				box.d.Sink(info, input)
+			}
+			return 0
+		})
+		copyFuncFinalizeCB = purego.NewCallback(func(_ purego.CDecl, info uintptr) uintptr {
+			defer func() {
+				_ = recover()
+			}()
+			if box := copyFuncDispatch.Load(); box != nil && box.d != nil && info != 0 {
+				box.d.Finalize(info)
+			}
+			return 0
+		})
+	})
+}
+
+// CopyFunctionBindCallback returns the process-wide singleton C COPY TO bind callback.
+func CopyFunctionBindCallback() uintptr {
+	ensureCopyFunctionCallbacks()
+	return copyFuncBindCB
+}
+
+// CopyFunctionGlobalInitCallback returns the process-wide singleton C COPY TO global-init callback.
+func CopyFunctionGlobalInitCallback() uintptr {
+	ensureCopyFunctionCallbacks()
+	return copyFuncInitCB
+}
+
+// CopyFunctionSinkCallback returns the process-wide singleton C COPY TO sink callback.
+func CopyFunctionSinkCallback() uintptr {
+	ensureCopyFunctionCallbacks()
+	return copyFuncSinkCB
+}
+
+// CopyFunctionFinalizeCallback returns the process-wide singleton C COPY TO finalize callback.
+func CopyFunctionFinalizeCallback() uintptr {
+	ensureCopyFunctionCallbacks()
+	return copyFuncFinalizeCB
+}
+
+// LogStorageWriteCallback returns the process-wide singleton C log entry write
+// callback (`void (*)(void *extra_data, duckdb_timestamp *timestamp, const char *level, const char *log_type, const char *log_message)`).
+func LogStorageWriteCallback() uintptr {
+	logStorageOnce.Do(func() {
+		logStorageWriteCB = purego.NewCallback(func(_ purego.CDecl, extraData, tsPtr, levelPtr, logTypePtr, msgPtr uintptr) uintptr {
+			defer func() {
+				_ = recover()
+			}()
+			if extraData == 0 {
+				return 0
+			}
+			v, ok := LookupHookHandle(extraData)
+			if !ok {
+				return 0
+			}
+			handler, ok := v.(LogStorageHandler)
+			if !ok || handler == nil {
+				return 0
+			}
+			var micros int64
+			if tsPtr != 0 {
+				micros = (*Timestamp)(Pointer(tsPtr)).Micros
+			}
+			handler.Write(micros, GoString(levelPtr), GoString(logTypePtr), GoString(msgPtr))
+			return 0
+		})
+	})
+	return logStorageWriteCB
 }

@@ -489,18 +489,24 @@ type API struct {
 	BindSetCardinality                      func(info uintptr, cardinality uint64, isExact bool)
 	BindSetError                            func(info uintptr, errMsg *byte)
 	TableFunctionGetClientContext           func(info uintptr, outContext *uintptr)
-	InitGetExtraInfo                        func(info uintptr) uintptr
-	InitGetBindData                         func(info uintptr) uintptr
-	InitSetInitData                         func(info uintptr, initData uintptr, destroy uintptr)
-	InitGetColumnCount                      func(info uintptr) uint64
-	InitGetColumnIndex                      func(info uintptr, columnIndex uint64) uint64
-	InitSetMaxThreads                       func(info uintptr, maxThreads uint64)
-	InitSetError                            func(info uintptr, errMsg *byte)
-	FunctionGetExtraInfo                    func(info uintptr) uintptr
-	FunctionGetBindData                     func(info uintptr) uintptr
-	FunctionGetInitData                     func(info uintptr) uintptr
-	FunctionGetLocalInitData                func(info uintptr) uintptr
-	FunctionSetError                        func(info uintptr, errMsg *byte)
+	// TableFunctionBindGetResultColumn* inspect the target table schema when a
+	// table function is invoked via COPY ... FROM. ColumnName is borrowed;
+	// ColumnType is owned and released by DestroyLogicalType.
+	TableFunctionBindGetResultColumnCount func(info uintptr) uint64
+	TableFunctionBindGetResultColumnName  func(info uintptr, colIdx uint64) uintptr
+	TableFunctionBindGetResultColumnType  func(info uintptr, colIdx uint64) uintptr
+	InitGetExtraInfo                      func(info uintptr) uintptr
+	InitGetBindData                       func(info uintptr) uintptr
+	InitSetInitData                       func(info uintptr, initData uintptr, destroy uintptr)
+	InitGetColumnCount                    func(info uintptr) uint64
+	InitGetColumnIndex                    func(info uintptr, columnIndex uint64) uint64
+	InitSetMaxThreads                     func(info uintptr, maxThreads uint64)
+	InitSetError                          func(info uintptr, errMsg *byte)
+	FunctionGetExtraInfo                  func(info uintptr) uintptr
+	FunctionGetBindData                   func(info uintptr) uintptr
+	FunctionGetInitData                   func(info uintptr) uintptr
+	FunctionGetLocalInitData              func(info uintptr) uintptr
+	FunctionSetError                      func(info uintptr, errMsg *byte)
 
 	// Expressions (v1.5.6 stable, used during ScalarFunction Bind).
 	// DestroyExpression releases an owned duckdb_expression. ExpressionReturnType
@@ -592,6 +598,58 @@ type API struct {
 	CastFunctionSetError            func(info uintptr, errMsg *byte)
 	CastFunctionSetRowError         func(info uintptr, errMsg *byte, row uint64, output uintptr)
 	RegisterCastFunction            func(connection uintptr, castFunction uintptr) int32
+
+	// Custom COPY functions (v1.5.6 stable).
+	// CreateCopyFunction allocates an owned duckdb_copy_function released by
+	// DestroyCopyFunction. All *GetClientContext methods return an owned
+	// duckdb_client_context released by DestroyClientContext.
+	// CopyFunctionBindGetColumnType returns an owned logical type released by
+	// DestroyLogicalType. CopyFunctionBindGetOptions returns an owned
+	// duckdb_value released by DestroyValue. CopyFunctionGlobalInitGetFilePath
+	// returns a borrowed C string valid for the duration of the callback.
+	CreateCopyFunction                     func() uintptr
+	DestroyCopyFunction                    func(copyFunction *uintptr)
+	CopyFunctionSetName                    func(copyFunction uintptr, name *byte)
+	CopyFunctionSetExtraInfo               func(copyFunction uintptr, extraInfo uintptr, destructor uintptr)
+	RegisterCopyFunction                   func(connection uintptr, copyFunction uintptr) int32
+	CopyFunctionSetBind                    func(copyFunction uintptr, bind uintptr)
+	CopyFunctionBindSetError               func(info uintptr, errMsg *byte)
+	CopyFunctionBindGetExtraInfo           func(info uintptr) uintptr
+	CopyFunctionBindGetClientContext       func(info uintptr) uintptr
+	CopyFunctionBindGetColumnCount         func(info uintptr) uint64
+	CopyFunctionBindGetColumnType          func(info uintptr, colIdx uint64) uintptr
+	CopyFunctionBindGetOptions             func(info uintptr) uintptr
+	CopyFunctionBindSetBindData            func(info uintptr, bindData uintptr, destructor uintptr)
+	CopyFunctionSetGlobalInit              func(copyFunction uintptr, init uintptr)
+	CopyFunctionGlobalInitSetError         func(info uintptr, errMsg *byte)
+	CopyFunctionGlobalInitGetExtraInfo     func(info uintptr) uintptr
+	CopyFunctionGlobalInitGetClientContext func(info uintptr) uintptr
+	CopyFunctionGlobalInitGetBindData      func(info uintptr) uintptr
+	CopyFunctionGlobalInitGetFilePath      func(info uintptr) uintptr
+	CopyFunctionGlobalInitSetGlobalState   func(info uintptr, globalState uintptr, destructor uintptr)
+	CopyFunctionSetSink                    func(copyFunction uintptr, function uintptr)
+	CopyFunctionSinkSetError               func(info uintptr, errMsg *byte)
+	CopyFunctionSinkGetExtraInfo           func(info uintptr) uintptr
+	CopyFunctionSinkGetClientContext       func(info uintptr) uintptr
+	CopyFunctionSinkGetBindData            func(info uintptr) uintptr
+	CopyFunctionSinkGetGlobalState         func(info uintptr) uintptr
+	CopyFunctionSetFinalize                func(copyFunction uintptr, finalize uintptr)
+	CopyFunctionFinalizeSetError           func(info uintptr, errMsg *byte)
+	CopyFunctionFinalizeGetExtraInfo       func(info uintptr) uintptr
+	CopyFunctionFinalizeGetClientContext   func(info uintptr) uintptr
+	CopyFunctionFinalizeGetBindData        func(info uintptr) uintptr
+	CopyFunctionFinalizeGetGlobalState     func(info uintptr) uintptr
+	CopyFunctionSetCopyFromFunction        func(copyFunction uintptr, tableFunction uintptr)
+
+	// Custom log storage (v1.5.6 stable).
+	// CreateLogStorage allocates an owned duckdb_log_storage released by
+	// DestroyLogStorage.
+	CreateLogStorage           func() uintptr
+	DestroyLogStorage          func(logStorage *uintptr)
+	LogStorageSetWriteLogEntry func(logStorage uintptr, function uintptr)
+	LogStorageSetExtraData     func(logStorage uintptr, extraData uintptr, deleteCallback uintptr)
+	LogStorageSetName          func(logStorage uintptr, name *byte)
+	RegisterLogStorage         func(database uintptr, logStorage uintptr) int32
 }
 
 // symbol pairs an API field with its exported native name.
@@ -931,6 +989,9 @@ func (a *API) symbols() []symbol {
 		{&a.BindSetCardinality, "duckdb_bind_set_cardinality"},
 		{&a.BindSetError, "duckdb_bind_set_error"},
 		{&a.TableFunctionGetClientContext, "duckdb_table_function_get_client_context"},
+		{&a.TableFunctionBindGetResultColumnCount, "duckdb_table_function_bind_get_result_column_count"},
+		{&a.TableFunctionBindGetResultColumnName, "duckdb_table_function_bind_get_result_column_name"},
+		{&a.TableFunctionBindGetResultColumnType, "duckdb_table_function_bind_get_result_column_type"},
 		{&a.InitGetExtraInfo, "duckdb_init_get_extra_info"},
 		{&a.InitGetBindData, "duckdb_init_get_bind_data"},
 		{&a.InitSetInitData, "duckdb_init_set_init_data"},
@@ -1008,5 +1069,44 @@ func (a *API) symbols() []symbol {
 		{&a.CastFunctionSetError, "duckdb_cast_function_set_error"},
 		{&a.CastFunctionSetRowError, "duckdb_cast_function_set_row_error"},
 		{&a.RegisterCastFunction, "duckdb_register_cast_function"},
+		{&a.CreateCopyFunction, "duckdb_create_copy_function"},
+		{&a.DestroyCopyFunction, "duckdb_destroy_copy_function"},
+		{&a.CopyFunctionSetName, "duckdb_copy_function_set_name"},
+		{&a.CopyFunctionSetExtraInfo, "duckdb_copy_function_set_extra_info"},
+		{&a.RegisterCopyFunction, "duckdb_register_copy_function"},
+		{&a.CopyFunctionSetBind, "duckdb_copy_function_set_bind"},
+		{&a.CopyFunctionBindSetError, "duckdb_copy_function_bind_set_error"},
+		{&a.CopyFunctionBindGetExtraInfo, "duckdb_copy_function_bind_get_extra_info"},
+		{&a.CopyFunctionBindGetClientContext, "duckdb_copy_function_bind_get_client_context"},
+		{&a.CopyFunctionBindGetColumnCount, "duckdb_copy_function_bind_get_column_count"},
+		{&a.CopyFunctionBindGetColumnType, "duckdb_copy_function_bind_get_column_type"},
+		{&a.CopyFunctionBindGetOptions, "duckdb_copy_function_bind_get_options"},
+		{&a.CopyFunctionBindSetBindData, "duckdb_copy_function_bind_set_bind_data"},
+		{&a.CopyFunctionSetGlobalInit, "duckdb_copy_function_set_global_init"},
+		{&a.CopyFunctionGlobalInitSetError, "duckdb_copy_function_global_init_set_error"},
+		{&a.CopyFunctionGlobalInitGetExtraInfo, "duckdb_copy_function_global_init_get_extra_info"},
+		{&a.CopyFunctionGlobalInitGetClientContext, "duckdb_copy_function_global_init_get_client_context"},
+		{&a.CopyFunctionGlobalInitGetBindData, "duckdb_copy_function_global_init_get_bind_data"},
+		{&a.CopyFunctionGlobalInitGetFilePath, "duckdb_copy_function_global_init_get_file_path"},
+		{&a.CopyFunctionGlobalInitSetGlobalState, "duckdb_copy_function_global_init_set_global_state"},
+		{&a.CopyFunctionSetSink, "duckdb_copy_function_set_sink"},
+		{&a.CopyFunctionSinkSetError, "duckdb_copy_function_sink_set_error"},
+		{&a.CopyFunctionSinkGetExtraInfo, "duckdb_copy_function_sink_get_extra_info"},
+		{&a.CopyFunctionSinkGetClientContext, "duckdb_copy_function_sink_get_client_context"},
+		{&a.CopyFunctionSinkGetBindData, "duckdb_copy_function_sink_get_bind_data"},
+		{&a.CopyFunctionSinkGetGlobalState, "duckdb_copy_function_sink_get_global_state"},
+		{&a.CopyFunctionSetFinalize, "duckdb_copy_function_set_finalize"},
+		{&a.CopyFunctionFinalizeSetError, "duckdb_copy_function_finalize_set_error"},
+		{&a.CopyFunctionFinalizeGetExtraInfo, "duckdb_copy_function_finalize_get_extra_info"},
+		{&a.CopyFunctionFinalizeGetClientContext, "duckdb_copy_function_finalize_get_client_context"},
+		{&a.CopyFunctionFinalizeGetBindData, "duckdb_copy_function_finalize_get_bind_data"},
+		{&a.CopyFunctionFinalizeGetGlobalState, "duckdb_copy_function_finalize_get_global_state"},
+		{&a.CopyFunctionSetCopyFromFunction, "duckdb_copy_function_set_copy_from_function"},
+		{&a.CreateLogStorage, "duckdb_create_log_storage"},
+		{&a.DestroyLogStorage, "duckdb_destroy_log_storage"},
+		{&a.LogStorageSetWriteLogEntry, "duckdb_log_storage_set_write_log_entry"},
+		{&a.LogStorageSetExtraData, "duckdb_log_storage_set_extra_data"},
+		{&a.LogStorageSetName, "duckdb_log_storage_set_name"},
+		{&a.RegisterLogStorage, "duckdb_register_log_storage"},
 	}
 }
