@@ -55,6 +55,7 @@ const (
 	TypeMap
 	TypeUnion
 	TypeVariant
+	TypeAny
 
 	// typeDefault is an internal sentinel kind used exclusively by DefaultValue()
 	// to request SQL column DEFAULT evaluation in Appender.AppendRow.
@@ -141,6 +142,8 @@ func (k TypeKind) String() string {
 		return "UNION"
 	case TypeVariant:
 		return "VARIANT"
+	case TypeAny:
+		return "ANY"
 	default:
 		return "INVALID"
 	}
@@ -178,6 +181,12 @@ func ScalarType(kind TypeKind) LogicalType {
 // JSONType constructs DuckDB's aliased JSON logical type (VARCHAR with alias "JSON").
 func JSONType() LogicalType {
 	return jsonLogicalType
+}
+
+// AnyType constructs DuckDB's polymorphic ANY logical type for TableFunction
+// parameters. ANY is rejected as a result column type.
+func AnyType() LogicalType {
+	return LogicalType{Kind: TypeAny}
 }
 
 // DecimalType constructs a DECIMAL(width, scale) LogicalType.
@@ -233,6 +242,15 @@ func GeometryType(crs string) LogicalType {
 // IsJSON reports whether t is DuckDB's JSON logical type (VARCHAR aliased as "JSON").
 func (t LogicalType) IsJSON() bool {
 	return t.Kind == TypeVarchar && t.Alias == "JSON"
+}
+
+// WithAlias returns a cloned copy of t with Alias set to alias. Useful for
+// referencing custom logical types registered via Conn.RegisterLogicalType in
+// Scalar, Aggregate, or Cast function signatures.
+func (t LogicalType) WithAlias(alias string) LogicalType {
+	cp := *cloneLogicalType(t)
+	cp.Alias = alias
+	return cp
 }
 
 func cloneLogicalType(t LogicalType) *LogicalType {

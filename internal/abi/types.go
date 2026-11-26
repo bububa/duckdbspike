@@ -353,3 +353,9 @@ const (
 	CatalogEntryTypeType              int32 = 8
 	CatalogEntryTypeDatabase          int32 = 9
 )
+
+// Cast modes mirror duckdb_cast_mode (v1.1.0+ stable).
+const (
+	CastModeNormal int32 = 0
+	CastModeTry    int32 = 1
+)

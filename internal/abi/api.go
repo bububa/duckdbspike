@@ -289,14 +289,16 @@ type API struct {
 	// Vectors and their data are borrowed from the owning chunk.
 	// CreateDataChunk allocates an owned duckdb_data_chunk released by
 	// DestroyDataChunk.
-	VectorSize                         func() uint64
-	CreateDataChunk                    func(types *uintptr, columnCount uint64) uintptr
-	DataChunkReset                     func(chunk uintptr)
-	DataChunkSetSize                   func(chunk uintptr, size uint64)
-	DataChunkGetSize                   func(chunk uintptr) uint64
-	DataChunkGetColumnCount            func(chunk uintptr) uint64
-	DataChunkGetVector                 func(chunk uintptr, column uint64) uintptr
-	DestroyDataChunk                   func(chunk *uintptr)
+	VectorSize              func() uint64
+	CreateDataChunk         func(types *uintptr, columnCount uint64) uintptr
+	DataChunkReset          func(chunk uintptr)
+	DataChunkSetSize        func(chunk uintptr, size uint64)
+	DataChunkGetSize        func(chunk uintptr) uint64
+	DataChunkGetColumnCount func(chunk uintptr) uint64
+	DataChunkGetVector      func(chunk uintptr, column uint64) uintptr
+	DestroyDataChunk        func(chunk *uintptr)
+	// VectorGetColumnType returns an OWNED logical type released by DestroyLogicalType.
+	VectorGetColumnType                func(vector uintptr) uintptr
 	VectorGetData                      func(vector uintptr) uintptr
 	VectorGetValidity                  func(vector uintptr) uintptr
 	VectorEnsureValidityWritable       func(vector uintptr)
@@ -427,6 +429,169 @@ type API struct {
 	FinishExecution     func(state uintptr)
 	TaskStateIsFinished func(state uintptr) bool
 	DestroyTaskState    func(state uintptr)
+
+	// Custom configuration options (v1.5.6 stable).
+	// CreateConfigOption allocates an owned duckdb_config_option released by
+	// DestroyConfigOption. ConfigOptionSetType and ConfigOptionSetDefaultValue
+	// borrow/copy their handle arguments; the caller remains responsible for
+	// destroying logicalType and defaultValue.
+	CreateConfigOption          func() uintptr
+	DestroyConfigOption         func(option *uintptr)
+	ConfigOptionSetName         func(option uintptr, name *byte)
+	ConfigOptionSetType         func(option uintptr, logicalType uintptr)
+	ConfigOptionSetDefaultValue func(option uintptr, defaultValue uintptr)
+	ConfigOptionSetDefaultScope func(option uintptr, defaultScope int32)
+	ConfigOptionSetDescription  func(option uintptr, description *byte)
+	RegisterConfigOption        func(connection uintptr, option uintptr) int32
+
+	// Custom logical types (v1.5.6 stable).
+	// RegisterLogicalType registers an aliased logicalType on connection (info
+	// may be 0). DuckDB copies logicalType; the caller still releases it via
+	// DestroyLogicalType.
+	RegisterLogicalType func(connection uintptr, logicalType uintptr, info uintptr) int32
+
+	// Replacement scans (v1.5.6 stable).
+	// AddReplacementScan registers a database-level replacement callback with
+	// extraData and an optional deleteCallback invoked on database close.
+	// ReplacementScanAddParameter borrows/copies parameter; the caller still
+	// releases parameter via DestroyValue.
+	AddReplacementScan             func(db uintptr, replacement uintptr, extraData uintptr, deleteCallback uintptr)
+	ReplacementScanSetFunctionName func(info uintptr, functionName *byte)
+	ReplacementScanAddParameter    func(info uintptr, parameter uintptr)
+	ReplacementScanSetError        func(info uintptr, errMsg *byte)
+
+	// Table functions (v1.5.6 stable).
+	// CreateTableFunction allocates an owned duckdb_table_function released by
+	// DestroyTableFunction. TableFunctionAddParameter and
+	// TableFunctionAddNamedParameter copy logicalType; the caller still releases
+	// it via DestroyLogicalType. BindGetParameter and BindGetNamedParameter
+	// return owned duckdb_value handles released by DestroyValue (or 0 if a
+	// named parameter was omitted). TableFunctionGetClientContext writes an
+	// owned client_context released by DestroyClientContext.
+	CreateTableFunction                     func() uintptr
+	DestroyTableFunction                    func(tableFunction *uintptr)
+	TableFunctionSetName                    func(tableFunction uintptr, name *byte)
+	TableFunctionAddParameter               func(tableFunction uintptr, logicalType uintptr)
+	TableFunctionAddNamedParameter          func(tableFunction uintptr, name *byte, logicalType uintptr)
+	TableFunctionSetExtraInfo               func(tableFunction uintptr, extraInfo uintptr, destroy uintptr)
+	TableFunctionSetBind                    func(tableFunction uintptr, bind uintptr)
+	TableFunctionSetInit                    func(tableFunction uintptr, init uintptr)
+	TableFunctionSetLocalInit               func(tableFunction uintptr, init uintptr)
+	TableFunctionSetFunction                func(tableFunction uintptr, function uintptr)
+	TableFunctionSupportsProjectionPushdown func(tableFunction uintptr, pushdown bool)
+	RegisterTableFunction                   func(connection uintptr, function uintptr) int32
+	BindGetExtraInfo                        func(info uintptr) uintptr
+	BindAddResultColumn                     func(info uintptr, name *byte, logicalType uintptr)
+	BindGetParameterCount                   func(info uintptr) uint64
+	BindGetParameter                        func(info uintptr, index uint64) uintptr
+	BindGetNamedParameter                   func(info uintptr, name *byte) uintptr
+	BindSetBindData                         func(info uintptr, bindData uintptr, destroy uintptr)
+	BindSetCardinality                      func(info uintptr, cardinality uint64, isExact bool)
+	BindSetError                            func(info uintptr, errMsg *byte)
+	TableFunctionGetClientContext           func(info uintptr, outContext *uintptr)
+	InitGetExtraInfo                        func(info uintptr) uintptr
+	InitGetBindData                         func(info uintptr) uintptr
+	InitSetInitData                         func(info uintptr, initData uintptr, destroy uintptr)
+	InitGetColumnCount                      func(info uintptr) uint64
+	InitGetColumnIndex                      func(info uintptr, columnIndex uint64) uint64
+	InitSetMaxThreads                       func(info uintptr, maxThreads uint64)
+	InitSetError                            func(info uintptr, errMsg *byte)
+	FunctionGetExtraInfo                    func(info uintptr) uintptr
+	FunctionGetBindData                     func(info uintptr) uintptr
+	FunctionGetInitData                     func(info uintptr) uintptr
+	FunctionGetLocalInitData                func(info uintptr) uintptr
+	FunctionSetError                        func(info uintptr, errMsg *byte)
+
+	// Expressions (v1.5.6 stable, used during ScalarFunction Bind).
+	// DestroyExpression releases an owned duckdb_expression. ExpressionReturnType
+	// returns an owned logical type released by DestroyLogicalType. ExpressionFold
+	// returns an owned duckdb_error_data released by DestroyErrorData (or 0) and
+	// writes an owned duckdb_value into outValue released by DestroyValue.
+	DestroyExpression    func(expr *uintptr)
+	ExpressionReturnType func(expr uintptr) uintptr
+	ExpressionIsFoldable func(expr uintptr) bool
+	ExpressionFold       func(clientCtx uintptr, expr uintptr, outValue *uintptr) uintptr
+
+	// Scalar functions & function sets (v1.1.0+ / v1.5.6 stable).
+	// CreateScalarFunction / CreateScalarFunctionSet allocate owned handles
+	// released by DestroyScalarFunction / DestroyScalarFunctionSet. Parameter
+	// and return logical types passed to Set*/Add* are copied by DuckDB; callers
+	// still destroy them via DestroyLogicalType. ScalarFunctionBindGetArgument
+	// returns an owned duckdb_expression released by DestroyExpression.
+	// ScalarFunctionGetClientContext and ScalarFunctionInitGetClientContext
+	// write an owned client_context released by DestroyClientContext.
+	CreateScalarFunction               func() uintptr
+	DestroyScalarFunction              func(scalarFunction *uintptr)
+	ScalarFunctionSetName              func(scalarFunction uintptr, name *byte)
+	ScalarFunctionSetVarargs           func(scalarFunction uintptr, logicalType uintptr)
+	ScalarFunctionSetSpecialHandling   func(scalarFunction uintptr)
+	ScalarFunctionSetVolatile          func(scalarFunction uintptr)
+	ScalarFunctionAddParameter         func(scalarFunction uintptr, logicalType uintptr)
+	ScalarFunctionSetReturnType        func(scalarFunction uintptr, logicalType uintptr)
+	ScalarFunctionSetExtraInfo         func(scalarFunction uintptr, extraInfo uintptr, destroy uintptr)
+	ScalarFunctionSetBind              func(scalarFunction uintptr, bind uintptr)
+	ScalarFunctionSetBindData          func(info uintptr, bindData uintptr, destroy uintptr)
+	ScalarFunctionSetBindDataCopy      func(info uintptr, copyCB uintptr)
+	ScalarFunctionBindSetError         func(info uintptr, errMsg *byte)
+	ScalarFunctionSetFunction          func(scalarFunction uintptr, function uintptr)
+	RegisterScalarFunction             func(connection uintptr, scalarFunction uintptr) int32
+	ScalarFunctionGetExtraInfo         func(info uintptr) uintptr
+	ScalarFunctionBindGetExtraInfo     func(info uintptr) uintptr
+	ScalarFunctionGetBindData          func(info uintptr) uintptr
+	ScalarFunctionGetClientContext     func(info uintptr, outContext *uintptr)
+	ScalarFunctionSetError             func(info uintptr, errMsg *byte)
+	CreateScalarFunctionSet            func(name *byte) uintptr
+	DestroyScalarFunctionSet           func(set *uintptr)
+	AddScalarFunctionToSet             func(set uintptr, function uintptr) int32
+	RegisterScalarFunctionSet          func(connection uintptr, set uintptr) int32
+	ScalarFunctionBindGetArgumentCount func(info uintptr) uint64
+	ScalarFunctionBindGetArgument      func(info uintptr, index uint64) uintptr
+	ScalarFunctionGetState             func(info uintptr) uintptr
+	ScalarFunctionSetInit              func(scalarFunction uintptr, init uintptr)
+	ScalarFunctionInitSetError         func(info uintptr, errMsg *byte)
+	ScalarFunctionInitSetState         func(info uintptr, state uintptr, destroy uintptr)
+	ScalarFunctionInitGetClientContext func(info uintptr, outContext *uintptr)
+	ScalarFunctionInitGetBindData      func(info uintptr) uintptr
+	ScalarFunctionInitGetExtraInfo     func(info uintptr) uintptr
+
+	// Aggregate functions & function sets (v1.1.0+ stable).
+	// CreateAggregateFunction / CreateAggregateFunctionSet allocate owned
+	// handles released by DestroyAggregateFunction / DestroyAggregateFunctionSet.
+	// Parameter and return logical types are copied by DuckDB; callers still
+	// destroy them via DestroyLogicalType.
+	CreateAggregateFunction             func() uintptr
+	DestroyAggregateFunction            func(aggregateFunction *uintptr)
+	AggregateFunctionSetName            func(aggregateFunction uintptr, name *byte)
+	AggregateFunctionAddParameter       func(aggregateFunction uintptr, logicalType uintptr)
+	AggregateFunctionSetReturnType      func(aggregateFunction uintptr, logicalType uintptr)
+	AggregateFunctionSetFunctions       func(aggregateFunction uintptr, stateSize, stateInit, update, combine, finalize uintptr)
+	AggregateFunctionSetDestructor      func(aggregateFunction uintptr, destroy uintptr)
+	RegisterAggregateFunction           func(connection uintptr, aggregateFunction uintptr) int32
+	AggregateFunctionSetSpecialHandling func(aggregateFunction uintptr)
+	AggregateFunctionSetExtraInfo       func(aggregateFunction uintptr, extraInfo uintptr, destroy uintptr)
+	AggregateFunctionGetExtraInfo       func(info uintptr) uintptr
+	AggregateFunctionSetError           func(info uintptr, errMsg *byte)
+	CreateAggregateFunctionSet          func(name *byte) uintptr
+	DestroyAggregateFunctionSet         func(set *uintptr)
+	AddAggregateFunctionToSet           func(set uintptr, function uintptr) int32
+	RegisterAggregateFunctionSet        func(connection uintptr, set uintptr) int32
+
+	// Cast functions (v1.1.0+ stable).
+	// CreateCastFunction allocates an owned duckdb_cast_function released by
+	// DestroyCastFunction. Source and target logical types are copied by DuckDB;
+	// callers still destroy them via DestroyLogicalType.
+	CreateCastFunction              func() uintptr
+	DestroyCastFunction             func(castFunction *uintptr)
+	CastFunctionSetSourceType       func(castFunction uintptr, sourceType uintptr)
+	CastFunctionSetTargetType       func(castFunction uintptr, targetType uintptr)
+	CastFunctionSetImplicitCastCost func(castFunction uintptr, cost int64)
+	CastFunctionSetFunction         func(castFunction uintptr, function uintptr)
+	CastFunctionSetExtraInfo        func(castFunction uintptr, extraInfo uintptr, destroy uintptr)
+	CastFunctionGetExtraInfo        func(info uintptr) uintptr
+	CastFunctionGetCastMode         func(info uintptr) int32
+	CastFunctionSetError            func(info uintptr, errMsg *byte)
+	CastFunctionSetRowError         func(info uintptr, errMsg *byte, row uint64, output uintptr)
+	RegisterCastFunction            func(connection uintptr, castFunction uintptr) int32
 }
 
 // symbol pairs an API field with its exported native name.
@@ -644,6 +809,7 @@ func (a *API) symbols() []symbol {
 		{&a.DataChunkGetColumnCount, "duckdb_data_chunk_get_column_count"},
 		{&a.DataChunkGetVector, "duckdb_data_chunk_get_vector"},
 		{&a.DestroyDataChunk, "duckdb_destroy_data_chunk"},
+		{&a.VectorGetColumnType, "duckdb_vector_get_column_type"},
 		{&a.VectorGetData, "duckdb_vector_get_data"},
 		{&a.VectorGetValidity, "duckdb_vector_get_validity"},
 		{&a.VectorEnsureValidityWritable, "duckdb_vector_ensure_validity_writable"},
@@ -731,5 +897,116 @@ func (a *API) symbols() []symbol {
 		{&a.FinishExecution, "duckdb_finish_execution"},
 		{&a.TaskStateIsFinished, "duckdb_task_state_is_finished"},
 		{&a.DestroyTaskState, "duckdb_destroy_task_state"},
+		{&a.CreateConfigOption, "duckdb_create_config_option"},
+		{&a.DestroyConfigOption, "duckdb_destroy_config_option"},
+		{&a.ConfigOptionSetName, "duckdb_config_option_set_name"},
+		{&a.ConfigOptionSetType, "duckdb_config_option_set_type"},
+		{&a.ConfigOptionSetDefaultValue, "duckdb_config_option_set_default_value"},
+		{&a.ConfigOptionSetDefaultScope, "duckdb_config_option_set_default_scope"},
+		{&a.ConfigOptionSetDescription, "duckdb_config_option_set_description"},
+		{&a.RegisterConfigOption, "duckdb_register_config_option"},
+		{&a.RegisterLogicalType, "duckdb_register_logical_type"},
+		{&a.AddReplacementScan, "duckdb_add_replacement_scan"},
+		{&a.ReplacementScanSetFunctionName, "duckdb_replacement_scan_set_function_name"},
+		{&a.ReplacementScanAddParameter, "duckdb_replacement_scan_add_parameter"},
+		{&a.ReplacementScanSetError, "duckdb_replacement_scan_set_error"},
+		{&a.CreateTableFunction, "duckdb_create_table_function"},
+		{&a.DestroyTableFunction, "duckdb_destroy_table_function"},
+		{&a.TableFunctionSetName, "duckdb_table_function_set_name"},
+		{&a.TableFunctionAddParameter, "duckdb_table_function_add_parameter"},
+		{&a.TableFunctionAddNamedParameter, "duckdb_table_function_add_named_parameter"},
+		{&a.TableFunctionSetExtraInfo, "duckdb_table_function_set_extra_info"},
+		{&a.TableFunctionSetBind, "duckdb_table_function_set_bind"},
+		{&a.TableFunctionSetInit, "duckdb_table_function_set_init"},
+		{&a.TableFunctionSetLocalInit, "duckdb_table_function_set_local_init"},
+		{&a.TableFunctionSetFunction, "duckdb_table_function_set_function"},
+		{&a.TableFunctionSupportsProjectionPushdown, "duckdb_table_function_supports_projection_pushdown"},
+		{&a.RegisterTableFunction, "duckdb_register_table_function"},
+		{&a.BindGetExtraInfo, "duckdb_bind_get_extra_info"},
+		{&a.BindAddResultColumn, "duckdb_bind_add_result_column"},
+		{&a.BindGetParameterCount, "duckdb_bind_get_parameter_count"},
+		{&a.BindGetParameter, "duckdb_bind_get_parameter"},
+		{&a.BindGetNamedParameter, "duckdb_bind_get_named_parameter"},
+		{&a.BindSetBindData, "duckdb_bind_set_bind_data"},
+		{&a.BindSetCardinality, "duckdb_bind_set_cardinality"},
+		{&a.BindSetError, "duckdb_bind_set_error"},
+		{&a.TableFunctionGetClientContext, "duckdb_table_function_get_client_context"},
+		{&a.InitGetExtraInfo, "duckdb_init_get_extra_info"},
+		{&a.InitGetBindData, "duckdb_init_get_bind_data"},
+		{&a.InitSetInitData, "duckdb_init_set_init_data"},
+		{&a.InitGetColumnCount, "duckdb_init_get_column_count"},
+		{&a.InitGetColumnIndex, "duckdb_init_get_column_index"},
+		{&a.InitSetMaxThreads, "duckdb_init_set_max_threads"},
+		{&a.InitSetError, "duckdb_init_set_error"},
+		{&a.FunctionGetExtraInfo, "duckdb_function_get_extra_info"},
+		{&a.FunctionGetBindData, "duckdb_function_get_bind_data"},
+		{&a.FunctionGetInitData, "duckdb_function_get_init_data"},
+		{&a.FunctionGetLocalInitData, "duckdb_function_get_local_init_data"},
+		{&a.FunctionSetError, "duckdb_function_set_error"},
+		{&a.DestroyExpression, "duckdb_destroy_expression"},
+		{&a.ExpressionReturnType, "duckdb_expression_return_type"},
+		{&a.ExpressionIsFoldable, "duckdb_expression_is_foldable"},
+		{&a.ExpressionFold, "duckdb_expression_fold"},
+		{&a.CreateScalarFunction, "duckdb_create_scalar_function"},
+		{&a.DestroyScalarFunction, "duckdb_destroy_scalar_function"},
+		{&a.ScalarFunctionSetName, "duckdb_scalar_function_set_name"},
+		{&a.ScalarFunctionSetVarargs, "duckdb_scalar_function_set_varargs"},
+		{&a.ScalarFunctionSetSpecialHandling, "duckdb_scalar_function_set_special_handling"},
+		{&a.ScalarFunctionSetVolatile, "duckdb_scalar_function_set_volatile"},
+		{&a.ScalarFunctionAddParameter, "duckdb_scalar_function_add_parameter"},
+		{&a.ScalarFunctionSetReturnType, "duckdb_scalar_function_set_return_type"},
+		{&a.ScalarFunctionSetExtraInfo, "duckdb_scalar_function_set_extra_info"},
+		{&a.ScalarFunctionSetBind, "duckdb_scalar_function_set_bind"},
+		{&a.ScalarFunctionSetBindData, "duckdb_scalar_function_set_bind_data"},
+		{&a.ScalarFunctionSetBindDataCopy, "duckdb_scalar_function_set_bind_data_copy"},
+		{&a.ScalarFunctionBindSetError, "duckdb_scalar_function_bind_set_error"},
+		{&a.ScalarFunctionSetFunction, "duckdb_scalar_function_set_function"},
+		{&a.RegisterScalarFunction, "duckdb_register_scalar_function"},
+		{&a.ScalarFunctionGetExtraInfo, "duckdb_scalar_function_get_extra_info"},
+		{&a.ScalarFunctionBindGetExtraInfo, "duckdb_scalar_function_bind_get_extra_info"},
+		{&a.ScalarFunctionGetBindData, "duckdb_scalar_function_get_bind_data"},
+		{&a.ScalarFunctionGetClientContext, "duckdb_scalar_function_get_client_context"},
+		{&a.ScalarFunctionSetError, "duckdb_scalar_function_set_error"},
+		{&a.CreateScalarFunctionSet, "duckdb_create_scalar_function_set"},
+		{&a.DestroyScalarFunctionSet, "duckdb_destroy_scalar_function_set"},
+		{&a.AddScalarFunctionToSet, "duckdb_add_scalar_function_to_set"},
+		{&a.RegisterScalarFunctionSet, "duckdb_register_scalar_function_set"},
+		{&a.ScalarFunctionBindGetArgumentCount, "duckdb_scalar_function_bind_get_argument_count"},
+		{&a.ScalarFunctionBindGetArgument, "duckdb_scalar_function_bind_get_argument"},
+		{&a.ScalarFunctionGetState, "duckdb_scalar_function_get_state"},
+		{&a.ScalarFunctionSetInit, "duckdb_scalar_function_set_init"},
+		{&a.ScalarFunctionInitSetError, "duckdb_scalar_function_init_set_error"},
+		{&a.ScalarFunctionInitSetState, "duckdb_scalar_function_init_set_state"},
+		{&a.ScalarFunctionInitGetClientContext, "duckdb_scalar_function_init_get_client_context"},
+		{&a.ScalarFunctionInitGetBindData, "duckdb_scalar_function_init_get_bind_data"},
+		{&a.ScalarFunctionInitGetExtraInfo, "duckdb_scalar_function_init_get_extra_info"},
+		{&a.CreateAggregateFunction, "duckdb_create_aggregate_function"},
+		{&a.DestroyAggregateFunction, "duckdb_destroy_aggregate_function"},
+		{&a.AggregateFunctionSetName, "duckdb_aggregate_function_set_name"},
+		{&a.AggregateFunctionAddParameter, "duckdb_aggregate_function_add_parameter"},
+		{&a.AggregateFunctionSetReturnType, "duckdb_aggregate_function_set_return_type"},
+		{&a.AggregateFunctionSetFunctions, "duckdb_aggregate_function_set_functions"},
+		{&a.AggregateFunctionSetDestructor, "duckdb_aggregate_function_set_destructor"},
+		{&a.RegisterAggregateFunction, "duckdb_register_aggregate_function"},
+		{&a.AggregateFunctionSetSpecialHandling, "duckdb_aggregate_function_set_special_handling"},
+		{&a.AggregateFunctionSetExtraInfo, "duckdb_aggregate_function_set_extra_info"},
+		{&a.AggregateFunctionGetExtraInfo, "duckdb_aggregate_function_get_extra_info"},
+		{&a.AggregateFunctionSetError, "duckdb_aggregate_function_set_error"},
+		{&a.CreateAggregateFunctionSet, "duckdb_create_aggregate_function_set"},
+		{&a.DestroyAggregateFunctionSet, "duckdb_destroy_aggregate_function_set"},
+		{&a.AddAggregateFunctionToSet, "duckdb_add_aggregate_function_to_set"},
+		{&a.RegisterAggregateFunctionSet, "duckdb_register_aggregate_function_set"},
+		{&a.CreateCastFunction, "duckdb_create_cast_function"},
+		{&a.DestroyCastFunction, "duckdb_destroy_cast_function"},
+		{&a.CastFunctionSetSourceType, "duckdb_cast_function_set_source_type"},
+		{&a.CastFunctionSetTargetType, "duckdb_cast_function_set_target_type"},
+		{&a.CastFunctionSetImplicitCastCost, "duckdb_cast_function_set_implicit_cast_cost"},
+		{&a.CastFunctionSetFunction, "duckdb_cast_function_set_function"},
+		{&a.CastFunctionSetExtraInfo, "duckdb_cast_function_set_extra_info"},
+		{&a.CastFunctionGetExtraInfo, "duckdb_cast_function_get_extra_info"},
+		{&a.CastFunctionGetCastMode, "duckdb_cast_function_get_cast_mode"},
+		{&a.CastFunctionSetError, "duckdb_cast_function_set_error"},
+		{&a.CastFunctionSetRowError, "duckdb_cast_function_set_row_error"},
+		{&a.RegisterCastFunction, "duckdb_register_cast_function"},
 	}
 }

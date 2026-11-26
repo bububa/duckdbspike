@@ -11,6 +11,8 @@ Practical examples for `github.com/bububa/duckdbspike` (`duckdb`, `duckdbsql`, a
 5. [Pure-Go Apache Arrow Pipelines (`duckdbarrow`)](#5-pure-go-apache-arrow-pipelines-duckdbarrow)
 6. [Transactions, `InstanceCache`, Multi-Statement Scripts, Observability, VFS & `Catalog`](#6-transactions-instancecache-multi-statement-scripts-observability-vfs--catalog)
 7. [Production Safety (`BudgetController`, Limits, Cancellation, & `ReadOnlySession`)](#7-production-safety-budgetcontroller-limits-cancellation--readonlysession)
+8. [External Worker Thread Scheduling (`TaskState`)](#8-external-worker-thread-scheduling-taskstate)
+9. [Pure-Go Extensions: Scalar, Aggregate, Cast, Table Functions & Replacement Scans](#9-pure-go-extensions-scalar-aggregate-cast-table-functions--replacement-scans)
 
 ---
 
@@ -613,4 +615,137 @@ for range 2 {
 ts.Finish()
 _ = ts.Close()
 wg.Wait()
+```
+
+---
+
+## 9. Pure-Go Extensions: Scalar, Aggregate, Cast, Table Functions & Replacement Scans
+
+Pure-Go (`CGO_ENABLED=0`) extensions run on a fixed 17-slot process-wide singleton `purego` callback switchboard (no callback slot exhaustion, GC-safe integer handle IDs, and panic-safe C++/Go boundaries).
+
+```go
+// 1. Register a custom runtime config option readable via ConfigOptionAs / SQL SET.
+defaultEnv := duckdb.VarcharValue("dev")
+if err := conn.RegisterConfigOption(duckdb.ConfigOptionSpec{
+	Name:         "app_env",
+	Type:         duckdb.ScalarType(duckdb.TypeVarchar),
+	DefaultValue: &defaultEnv,
+	DefaultScope: duckdb.ConfigOptionScopeSession,
+	Description:  "Application environment name",
+}); err != nil {
+	return err
+}
+_, _ = conn.Exec(ctx, `SET app_env = 'prod'`)
+env, _, _, _ := duckdb.ConfigOptionAs[string](conn, "app_env")
+fmt.Printf("app_env=%s\n", env)
+
+// 2. Register a custom aliased logical type usable in DDL and casts.
+if err := conn.RegisterLogicalType("user_id", duckdb.ScalarType(duckdb.TypeBigint)); err != nil {
+	return err
+}
+_, _ = conn.Exec(ctx, `CREATE TABLE accounts (id user_id)`)
+
+// 3. Register a pure-Go Table Function (supports named params, AnyType, ProjectionPushdown, MaxThreads + LocalInit).
+if err := conn.RegisterTableFunction(duckdb.TableFunctionSpec{
+	Name:       "mem_source",
+	Parameters: []duckdb.LogicalType{duckdb.ScalarType(duckdb.TypeVarchar)},
+	Bind: func(in duckdb.TableFunctionBindInput) (duckdb.TableFunctionBindResult, error) {
+		name, _ := in.Args[0].Varchar()
+		return duckdb.TableFunctionBindResult{
+			Columns: []duckdb.Column{
+				{Name: "source", Type: duckdb.ScalarType(duckdb.TypeVarchar)},
+				{Name: "seq", Type: duckdb.ScalarType(duckdb.TypeBigint)},
+			},
+			Cardinality: 3,
+			ExactCard:   true,
+			BindData:    name,
+		}, nil
+	},
+	Init: func(in duckdb.TableFunctionInitInput) (duckdb.TableFunctionInitResult, error) {
+		idx := int64(0)
+		return duckdb.TableFunctionInitResult{InitData: &idx}, nil
+	},
+	Execute: func(bindData, initData, _ any, chunk *duckdb.TableFunctionChunk) error {
+		src := bindData.(string)
+		idx := initData.(*int64)
+		for *idx < 3 && chunk.Len() < chunk.Cap() {
+			if err := chunk.AppendRow(duckdb.VarcharValue(src), duckdb.Int64Value(*idx)); err != nil {
+				return err
+			}
+			*idx++
+		}
+		return nil
+	},
+}); err != nil {
+	return err
+}
+
+// 4. Register a Replacement Scan rewriting `SELECT * FROM 'mem://events'` into `mem_source('events')`.
+if err := db.AddReplacementScan(func(tableName string) (*duckdb.ReplacementScanResult, error) {
+	if strings.HasPrefix(tableName, "mem://") {
+		return &duckdb.ReplacementScanResult{
+			FunctionName: "mem_source",
+			Parameters:   []duckdb.Value{duckdb.VarcharValue(strings.TrimPrefix(tableName, "mem://"))},
+		}, nil
+	}
+	return nil, nil // decline so DuckDB continues normal resolution
+}); err != nil {
+	return err
+}
+
+rows, err := conn.Query(ctx, `SELECT source, seq FROM 'mem://events' ORDER BY seq`)
+if err != nil {
+	return err
+}
+defer rows.Close()
+
+// 5. Register a Scalar Function (supports Bind/Init/Varargs/Volatile/SpecialNulls + FunctionSets).
+if err := conn.RegisterScalarFunction(duckdb.ScalarFunctionSpec{
+	Name:       "double_it",
+	Parameters: []duckdb.LogicalType{duckdb.ScalarType(duckdb.TypeBigint)},
+	ReturnType: duckdb.ScalarType(duckdb.TypeBigint),
+	Execute: func(_, _ any, args []duckdb.Value) (duckdb.Value, error) {
+		v, _ := args[0].Int64()
+		return duckdb.Int64Value(v * 2), nil
+	},
+}); err != nil {
+	return err
+}
+
+// 6. Register an Aggregate Function (parallel GROUP BY safe via handle-ID state).
+type sumAcc struct{ sum int64 }
+if err := conn.RegisterAggregateFunction(duckdb.AggregateFunctionSpec{
+	Name:       "go_sum",
+	Parameters: []duckdb.LogicalType{duckdb.ScalarType(duckdb.TypeBigint)},
+	ReturnType: duckdb.ScalarType(duckdb.TypeBigint),
+	Init:       func() any { return &sumAcc{} },
+	Update: func(st any, args []duckdb.Value) error {
+		v, _ := args[0].Int64()
+		st.(*sumAcc).sum += v
+		return nil
+	},
+	Combine: func(src, dst any) error {
+		dst.(*sumAcc).sum += src.(*sumAcc).sum
+		return nil
+	},
+	Finalize: func(st any) (duckdb.Value, error) {
+		return duckdb.Int64Value(st.(*sumAcc).sum), nil
+	},
+}); err != nil {
+	return err
+}
+
+// 7. Register a Custom Cast Function (supports CAST and TRY_CAST).
+_ = conn.RegisterLogicalType("celsius", duckdb.ScalarType(duckdb.TypeDouble))
+_ = conn.RegisterLogicalType("fahrenheit", duckdb.ScalarType(duckdb.TypeDouble))
+if err := conn.RegisterCastFunction(duckdb.CastFunctionSpec{
+	SourceType: duckdb.ScalarType(duckdb.TypeDouble).WithAlias("celsius"),
+	TargetType: duckdb.ScalarType(duckdb.TypeDouble).WithAlias("fahrenheit"),
+	Cast: func(_ duckdb.CastMode, val duckdb.Value) (duckdb.Value, error) {
+		c, _ := val.Float64()
+		return duckdb.Float64Value(c*9.0/5.0 + 32.0), nil
+	},
+}); err != nil {
+	return err
+}
 ```

@@ -282,162 +282,164 @@ func createNativeLogicalType(api *abi.API, lt LogicalType, depth int, limits Dec
 	if depth > limits.MaxNestingDepth {
 		return 0, fmt.Errorf("%w: bind type nesting depth %d exceeds %d", ErrLimitExceeded, depth, limits.MaxNestingDepth)
 	}
-	if id, ok := abiTypeIDForScalar(lt.Kind); ok {
-		h := api.CreateLogicalType(id)
+	var h uintptr
+	if lt.Kind == TypeAny {
+		h = api.CreateLogicalType(abi.TypeAny)
 		if h == 0 {
 			return 0, nativeError("create_logical_type", abi.ErrorInvalid, "")
 		}
-		if err := applyLogicalTypeAlias(api, h, lt.Alias); err != nil {
-			api.DestroyLogicalType(&h)
-			return 0, err
-		}
 		return h, nil
 	}
-	switch lt.Kind {
-	case TypeDecimal:
-		if lt.DecimalWidth < 1 || lt.DecimalWidth > 38 || lt.DecimalScale > lt.DecimalWidth {
-			return 0, fmt.Errorf("%w: invalid DECIMAL(%d,%d)", ErrInvalidInput, lt.DecimalWidth, lt.DecimalScale)
-		}
-		h := api.CreateDecimalType(lt.DecimalWidth, lt.DecimalScale)
+	if id, ok := abiTypeIDForScalar(lt.Kind); ok {
+		h = api.CreateLogicalType(id)
 		if h == 0 {
-			return 0, nativeError("create_decimal_type", abi.ErrorInvalid, "")
+			return 0, nativeError("create_logical_type", abi.ErrorInvalid, "")
 		}
-		return h, nil
-	case TypeEnum:
-		if len(lt.EnumValues) == 0 {
-			return 0, fmt.Errorf("%w: ENUM requires at least one dictionary member", ErrInvalidInput)
-		}
-		if uint64(len(lt.EnumValues)) > limits.MaxCollectionLen {
-			return 0, fmt.Errorf("%w: enum dictionary size %d exceeds %d", ErrLimitExceeded, len(lt.EnumValues), limits.MaxCollectionLen)
-		}
-		var pinner runtime.Pinner
-		defer pinner.Unpin()
-		cnames := make([][]byte, len(lt.EnumValues))
-		ptrs := make([]uintptr, len(lt.EnumValues))
-		for i, label := range lt.EnumValues {
-			cb, err := abi.CString(label)
-			if err != nil {
-				return 0, fmt.Errorf("%w: enum label[%d]: %v", ErrInvalidInput, i, err)
+	} else {
+		switch lt.Kind {
+		case TypeDecimal:
+			if lt.DecimalWidth < 1 || lt.DecimalWidth > 38 || lt.DecimalScale > lt.DecimalWidth {
+				return 0, fmt.Errorf("%w: invalid DECIMAL(%d,%d)", ErrInvalidInput, lt.DecimalWidth, lt.DecimalScale)
 			}
-			cnames[i] = cb
-			pinner.Pin(&cb[0])
-			ptrs[i] = uintptr(unsafe.Pointer(&cb[0]))
-		}
-		h := api.CreateEnumType(&ptrs[0], uint64(len(ptrs)))
-		runtime.KeepAlive(cnames)
-		runtime.KeepAlive(ptrs)
-		if h == 0 {
-			return 0, nativeError("create_enum_type", abi.ErrorInvalid, "")
-		}
-		return h, nil
-	case TypeList:
-		if lt.Elem == nil {
-			return 0, fmt.Errorf("%w: LIST requires Elem logical type", ErrInvalidInput)
-		}
-		child, err := createNativeLogicalType(api, *lt.Elem, depth+1, limits)
-		if err != nil {
-			return 0, err
-		}
-		defer api.DestroyLogicalType(&child)
-		h := api.CreateListType(child)
-		if h == 0 {
-			return 0, nativeError("create_list_type", abi.ErrorInvalid, "")
-		}
-		return h, nil
-	case TypeArray:
-		if lt.Elem == nil || lt.ArraySize == 0 {
-			return 0, fmt.Errorf("%w: ARRAY requires Elem logical type and positive size", ErrInvalidInput)
-		}
-		if lt.ArraySize > limits.MaxCollectionLen {
-			return 0, fmt.Errorf("%w: array size %d exceeds %d", ErrLimitExceeded, lt.ArraySize, limits.MaxCollectionLen)
-		}
-		child, err := createNativeLogicalType(api, *lt.Elem, depth+1, limits)
-		if err != nil {
-			return 0, err
-		}
-		defer api.DestroyLogicalType(&child)
-		h := api.CreateArrayType(child, lt.ArraySize)
-		if h == 0 {
-			return 0, nativeError("create_array_type", abi.ErrorInvalid, "")
-		}
-		return h, nil
-	case TypeMap:
-		if lt.Key == nil || lt.Value == nil {
-			return 0, fmt.Errorf("%w: MAP requires Key and Value logical types", ErrInvalidInput)
-		}
-		keyLT, err := createNativeLogicalType(api, *lt.Key, depth+1, limits)
-		if err != nil {
-			return 0, err
-		}
-		defer api.DestroyLogicalType(&keyLT)
-		valLT, err := createNativeLogicalType(api, *lt.Value, depth+1, limits)
-		if err != nil {
-			return 0, err
-		}
-		defer api.DestroyLogicalType(&valLT)
-		h := api.CreateMapType(keyLT, valLT)
-		if h == 0 {
-			return 0, nativeError("create_map_type", abi.ErrorInvalid, "")
-		}
-		return h, nil
-	case TypeStruct, TypeUnion:
-		if len(lt.Fields) == 0 {
-			return 0, fmt.Errorf("%w: %s requires at least one member", ErrInvalidInput, lt.Kind)
-		}
-		if lt.Kind == TypeUnion && len(lt.Fields) > 256 {
-			return 0, fmt.Errorf("%w: union member count %d exceeds 256", ErrLimitExceeded, len(lt.Fields))
-		}
-		if uint64(len(lt.Fields)) > limits.MaxCollectionLen {
-			return 0, fmt.Errorf("%w: %s member count %d exceeds %d", ErrLimitExceeded, lt.Kind, len(lt.Fields), limits.MaxCollectionLen)
-		}
-		var pinner runtime.Pinner
-		defer pinner.Unpin()
-		memberTypes := make([]uintptr, len(lt.Fields))
-		defer func() {
-			for i := range memberTypes {
-				if memberTypes[i] != 0 {
-					api.DestroyLogicalType(&memberTypes[i])
+			h = api.CreateDecimalType(lt.DecimalWidth, lt.DecimalScale)
+			if h == 0 {
+				return 0, nativeError("create_decimal_type", abi.ErrorInvalid, "")
+			}
+		case TypeEnum:
+			if len(lt.EnumValues) == 0 {
+				return 0, fmt.Errorf("%w: ENUM requires at least one dictionary member", ErrInvalidInput)
+			}
+			if uint64(len(lt.EnumValues)) > limits.MaxCollectionLen {
+				return 0, fmt.Errorf("%w: enum dictionary size %d exceeds %d", ErrLimitExceeded, len(lt.EnumValues), limits.MaxCollectionLen)
+			}
+			var pinner runtime.Pinner
+			defer pinner.Unpin()
+			cnames := make([][]byte, len(lt.EnumValues))
+			ptrs := make([]uintptr, len(lt.EnumValues))
+			for i, label := range lt.EnumValues {
+				cb, err := abi.CString(label)
+				if err != nil {
+					return 0, fmt.Errorf("%w: enum label[%d]: %v", ErrInvalidInput, i, err)
 				}
+				cnames[i] = cb
+				pinner.Pin(&cb[0])
+				ptrs[i] = uintptr(unsafe.Pointer(&cb[0]))
 			}
-		}()
-		cnames := make([][]byte, len(lt.Fields))
-		namePtrs := make([]uintptr, len(lt.Fields))
-		for i, f := range lt.Fields {
-			if f.Name == "" {
-				return 0, fmt.Errorf("%w: %s member %d has empty name", ErrInvalidInput, lt.Kind, i)
+			h = api.CreateEnumType(&ptrs[0], uint64(len(ptrs)))
+			runtime.KeepAlive(cnames)
+			runtime.KeepAlive(ptrs)
+			if h == 0 {
+				return 0, nativeError("create_enum_type", abi.ErrorInvalid, "")
 			}
-			cb, err := abi.CString(f.Name)
-			if err != nil {
-				return 0, fmt.Errorf("%w: %s member %q: %v", ErrInvalidInput, lt.Kind, f.Name, err)
+		case TypeList:
+			if lt.Elem == nil {
+				return 0, fmt.Errorf("%w: LIST requires Elem logical type", ErrInvalidInput)
 			}
-			cnames[i] = cb
-			pinner.Pin(&cb[0])
-			namePtrs[i] = uintptr(unsafe.Pointer(&cb[0]))
-			mt, err := createNativeLogicalType(api, f.Type, depth+1, limits)
+			child, err := createNativeLogicalType(api, *lt.Elem, depth+1, limits)
 			if err != nil {
 				return 0, err
 			}
-			memberTypes[i] = mt
+			defer api.DestroyLogicalType(&child)
+			h = api.CreateListType(child)
+			if h == 0 {
+				return 0, nativeError("create_list_type", abi.ErrorInvalid, "")
+			}
+		case TypeArray:
+			if lt.Elem == nil || lt.ArraySize == 0 {
+				return 0, fmt.Errorf("%w: ARRAY requires Elem logical type and positive size", ErrInvalidInput)
+			}
+			if lt.ArraySize > limits.MaxCollectionLen {
+				return 0, fmt.Errorf("%w: array size %d exceeds %d", ErrLimitExceeded, lt.ArraySize, limits.MaxCollectionLen)
+			}
+			child, err := createNativeLogicalType(api, *lt.Elem, depth+1, limits)
+			if err != nil {
+				return 0, err
+			}
+			defer api.DestroyLogicalType(&child)
+			h = api.CreateArrayType(child, lt.ArraySize)
+			if h == 0 {
+				return 0, nativeError("create_array_type", abi.ErrorInvalid, "")
+			}
+		case TypeMap:
+			if lt.Key == nil || lt.Value == nil {
+				return 0, fmt.Errorf("%w: MAP requires Key and Value logical types", ErrInvalidInput)
+			}
+			keyLT, err := createNativeLogicalType(api, *lt.Key, depth+1, limits)
+			if err != nil {
+				return 0, err
+			}
+			defer api.DestroyLogicalType(&keyLT)
+			valLT, err := createNativeLogicalType(api, *lt.Value, depth+1, limits)
+			if err != nil {
+				return 0, err
+			}
+			defer api.DestroyLogicalType(&valLT)
+			h = api.CreateMapType(keyLT, valLT)
+			if h == 0 {
+				return 0, nativeError("create_map_type", abi.ErrorInvalid, "")
+			}
+		case TypeStruct, TypeUnion:
+			if len(lt.Fields) == 0 {
+				return 0, fmt.Errorf("%w: %s requires at least one member", ErrInvalidInput, lt.Kind)
+			}
+			if lt.Kind == TypeUnion && len(lt.Fields) > 256 {
+				return 0, fmt.Errorf("%w: union member count %d exceeds 256", ErrLimitExceeded, len(lt.Fields))
+			}
+			if uint64(len(lt.Fields)) > limits.MaxCollectionLen {
+				return 0, fmt.Errorf("%w: %s member count %d exceeds %d", ErrLimitExceeded, lt.Kind, len(lt.Fields), limits.MaxCollectionLen)
+			}
+			var pinner runtime.Pinner
+			defer pinner.Unpin()
+			memberTypes := make([]uintptr, len(lt.Fields))
+			defer func() {
+				for i := range memberTypes {
+					if memberTypes[i] != 0 {
+						api.DestroyLogicalType(&memberTypes[i])
+					}
+				}
+			}()
+			cnames := make([][]byte, len(lt.Fields))
+			namePtrs := make([]uintptr, len(lt.Fields))
+			for i, f := range lt.Fields {
+				if f.Name == "" {
+					return 0, fmt.Errorf("%w: %s member %d has empty name", ErrInvalidInput, lt.Kind, i)
+				}
+				cb, err := abi.CString(f.Name)
+				if err != nil {
+					return 0, fmt.Errorf("%w: %s member %q: %v", ErrInvalidInput, lt.Kind, f.Name, err)
+				}
+				cnames[i] = cb
+				pinner.Pin(&cb[0])
+				namePtrs[i] = uintptr(unsafe.Pointer(&cb[0]))
+				mt, err := createNativeLogicalType(api, f.Type, depth+1, limits)
+				if err != nil {
+					return 0, err
+				}
+				memberTypes[i] = mt
+			}
+			var op string
+			if lt.Kind == TypeStruct {
+				op = "create_struct_type"
+				h = api.CreateStructType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
+			} else {
+				op = "create_union_type"
+				h = api.CreateUnionType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
+			}
+			runtime.KeepAlive(cnames)
+			runtime.KeepAlive(namePtrs)
+			runtime.KeepAlive(memberTypes)
+			if h == 0 {
+				return 0, nativeError(op, abi.ErrorInvalid, "")
+			}
+		default:
+			return 0, fmt.Errorf("%w: cannot build native logical type for %s", ErrUnsupportedType, lt.Kind)
 		}
-		var h uintptr
-		var op string
-		if lt.Kind == TypeStruct {
-			op = "create_struct_type"
-			h = api.CreateStructType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
-		} else {
-			op = "create_union_type"
-			h = api.CreateUnionType(&memberTypes[0], &namePtrs[0], uint64(len(memberTypes)))
-		}
-		runtime.KeepAlive(cnames)
-		runtime.KeepAlive(namePtrs)
-		runtime.KeepAlive(memberTypes)
-		if h == 0 {
-			return 0, nativeError(op, abi.ErrorInvalid, "")
-		}
-		return h, nil
-	default:
-		return 0, fmt.Errorf("%w: cannot build native logical type for %s", ErrUnsupportedType, lt.Kind)
 	}
+	if err := applyLogicalTypeAlias(api, h, lt.Alias); err != nil {
+		api.DestroyLogicalType(&h)
+		return 0, err
+	}
+	return h, nil
 }
 
 func destroyNativeValues(api *abi.API, vals []uintptr) {
